@@ -42,11 +42,14 @@ async def health():
     return {"status": "ok", "agent": "trade-exception-review"}
 
 
-# Phase 2+: Route registrations will be added here
-# from backend.api.routes import stream, decision, queue
-# app.include_router(stream.router)
-# app.include_router(decision.router)
-# app.include_router(queue.router)
+# Phase 2: Route registrations
+# LEARNING: We register routers here at the app level, not inside the route
+# files themselves. This keeps routes as pure request handlers with no
+# knowledge of the app they're mounted into.
+from backend.api.routes import stream, decision, queue
+app.include_router(stream.router)
+app.include_router(decision.router)
+app.include_router(queue.router)
 
 if __name__ == "__main__":
     import uvicorn
