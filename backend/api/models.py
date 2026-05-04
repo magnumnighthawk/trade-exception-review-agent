@@ -35,6 +35,7 @@ class HumanDecisionRequest(BaseModel):
     If you change this shape you must also update the interrupt() call in nodes.py.
 
     HITL: This is the contract between the UI's DecisionSurface and the backend.
+    Phase 4: Extended with audit fields (reason, confidence_before) for logging.
     """
     action: Literal["approve", "reject", "modify", "escalate"]
     modification: Optional[str] = Field(
@@ -42,6 +43,9 @@ class HumanDecisionRequest(BaseModel):
         description="Required when action is 'modify', optional context for 'reject'"
     )
     operator_id: str = Field(..., description="ID of the operator making this decision")
+    reason: Optional[str] = Field(default=None, description="Why the operator made this decision")
+    confidence_before: Optional[float] = Field(default=None, description="Agent confidence before decision")
+    escalation_category: Optional[str] = Field(default=None, description="Where to escalate (if action='escalate')")
 
 
 # ── SSE event models ───────────────────────────────────────────────────────────
@@ -173,3 +177,63 @@ class CheckpointStateResponse(BaseModel):
     status: Optional[str] = None
     state_keys: list[str] = Field(default_factory=list)
     checkpointer_backend: str
+
+
+# ── Audit trail models (Phase 4) ───────────────────────────────────────────
+
+class AuditEntryResponse(BaseModel):
+    """
+    One immutable decision log entry.
+
+    HITL: Every decision by a human is logged here. In production, this would
+    be in an append-only database (Postgres with no UPDATE/DELETE).
+    Regulators and compliance teams review this to audit the agent's governance.
+    """
+    audit_entry_id: str
+    timestamp: str
+    operator_id: str
+    thread_id: str
+    trade_id: str
+    decision: Literal["approve", "reject", "modify", "escalate"]
+    modification: Optional[str] = None
+    reason: Optional[str] = None
+    confidence_before: Optional[float] = None
+    agent_proposal_before: Optional[str] = None
+    escalation_category: Optional[str] = None
+
+
+class AuditLogResponse(BaseModel):
+    """
+    Audit history for one thread.
+
+    LEARNING: When an operator clicks into a thread, they see this history
+    so they know: what was investigated, what did the agent propose, what did
+    the previous operator(s) decide? This is full traceability.
+    """
+    thread_id: str
+    trade_id: str
+    audit_entries: list[AuditEntryResponse]
+    total_entries: int
+
+
+class SubmitDecisionRequest(BaseModel):
+    """
+    Request body for POST /queue/audit — log a decision after submission.
+    This is separate from HumanDecisionRequest because we may want different
+    field validation for the decision flow vs. the audit endpoint.
+    """
+    thread_id: str
+    operator_id: str
+    decision: Literal["approve", "reject", "modify", "escalate"]
+    modification: Optional[str] = None
+    reason: Optional[str] = None
+    confidence_before: Optional[float] = None
+    agent_proposal_before: Optional[str] = None
+    escalation_category: Optional[str] = None
+
+
+class SubmitDecisionResponse(BaseModel):
+    """Response after logging a decision."""
+    audit_entry_id: str
+    timestamp: str
+    message: str = "Decision logged"

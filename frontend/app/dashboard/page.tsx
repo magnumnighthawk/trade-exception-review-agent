@@ -84,9 +84,9 @@ export default function DashboardPage() {
 
         {/* Panel 1 — Exception Queue */}
         <ExceptionQueue
-          activeTradeId={activeTradeId}
+          selectedThreadId={activeTradeId}
           agentStatus={status}
-          onSelectTrade={handleSelectTrade}
+          onSelectThread={handleSelectTrade}
         />
 
         {/* Panel 2 — Agent Reasoning */}

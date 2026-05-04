@@ -21,6 +21,12 @@
  * operators calibrate their review depth to stated confidence. Low confidence
  * should slow down the operator, not just change a colour.
  * Hence the warning text at < 70%.
+ *
+ * Phase 4: Enhanced with confidence gating, audit fields, escalation categories.
+ * - Confidence < 0.70: Cannot approve, must modify or escalate
+ * - Confidence 0.70-0.85: Can approve but should review reasoning
+ * - Confidence > 0.85: Low friction approval (one-click)
+ * - Audit capture: operator_id, reason for compliance
  */
 
 "use client"
@@ -35,6 +41,21 @@ const RISK_STYLES: Record<string, { badge: string; bar: string }> = {
   low:      { badge: "bg-green-500/20 text-green-400 border border-green-500/30",  bar: "bg-green-500" },
 }
 
+// Phase 4: Escalation categories for triage
+const ESCALATION_CATEGORIES = [
+  "Senior Operator Review",
+  "Counterparty Intervention",
+  "Risk Committee",
+  "Legal Review",
+  "External Escalation",
+]
+
+// Phase 4: Confidence thresholds gate UI behavior
+const CONFIDENCE_THRESHOLDS = {
+  AUTO_APPROVABLE: 0.85,
+  REQUIRES_REVIEW: 0.70,
+}
+
 interface Props {
   status: AgentStatus
   interruptPayload: InterruptPayload | null
@@ -42,8 +63,11 @@ interface Props {
 }
 
 export function DecisionSurface({ status, interruptPayload, onDecision }: Props) {
-  const [mode, setMode] = useState<"review" | "reject" | "modify">("review")
+  const [mode, setMode] = useState<"review" | "reject" | "modify" | "escalate">("review")
   const [inputText, setInputText] = useState("")
+  const [operatorId, setOperatorId] = useState("operator_001")
+  const [reason, setReason] = useState("")
+  const [escalationCategory, setEscalationCategory] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
   // Reset local state when a new interrupt arrives
@@ -52,17 +76,33 @@ export function DecisionSurface({ status, interruptPayload, onDecision }: Props)
 
   const handleSubmit = async (action: DecisionAction) => {
     if (!payload) return
+    // Phase 4: Confidence gating - low confidence cannot be approved
+    if (action === "approve" && payload.confidence < CONFIDENCE_THRESHOLDS.REQUIRES_REVIEW) {
+      alert("Cannot approve: agent confidence is too low. Please modify or escalate.")
+      return
+    }
     if ((action === "modify" || action === "reject") && !inputText.trim()) return
+    if (action === "escalate" && !escalationCategory) {
+      alert("Please select an escalation category.")
+      return
+    }
 
     setSubmitting(true)
-    await onDecision({
-      action,
-      modification: inputText.trim() || null,
-      operator_id: "operator_001",
-    })
-    setSubmitting(false)
-    setMode("review")
-    setInputText("")
+    try {
+      await onDecision({
+        action,
+        modification: inputText.trim() || null,
+        operator_id: operatorId,
+        reason: reason.trim() || null,
+        confidence_before: payload.confidence,
+        escalation_category: escalationCategory || null,
+      } as any)  // Type assertion for Phase 4 fields
+    } finally {
+      setSubmitting(false)
+      setMode("review")
+      setInputText("")
+      setReason("")
+    }
   }
 
   // ── Idle / non-HITL state ──────────────────────────────────────────────────
@@ -106,14 +146,21 @@ export function DecisionSurface({ status, interruptPayload, onDecision }: Props)
   const proposal = payload.proposal
   const risk = RISK_STYLES[proposal.risk_level] ?? RISK_STYLES.medium
   const confidencePct = Math.round(payload.confidence * 100)
-  const isLowConfidence = payload.confidence < 0.70
+  const isLowConfidence = payload.confidence < CONFIDENCE_THRESHOLDS.REQUIRES_REVIEW
+  const canApprove = payload.confidence >= CONFIDENCE_THRESHOLDS.REQUIRES_REVIEW
 
   return (
-    <div className="flex flex-col h-full bg-zinc-900 border border-yellow-500/30 rounded-lg overflow-hidden">
+    <div className={`flex flex-col h-full bg-zinc-900 border rounded-lg overflow-hidden ${
+      isLowConfidence ? "border-red-500/40" : "border-yellow-500/30"
+    }`}>
       {/* Header */}
-      <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between bg-yellow-500/5">
+      <div className={`px-4 py-3 border-b border-zinc-800 flex items-center justify-between ${
+        isLowConfidence ? "bg-red-500/5" : "bg-yellow-500/5"
+      }`}>
         <div>
-          <h2 className="text-sm font-semibold text-zinc-100">Decision Required</h2>
+          <h2 className="text-sm font-semibold text-zinc-100">
+            {isLowConfidence ? "⚠️ Low Confidence Review Required" : "Decision Required"}
+          </h2>
           <p className="text-xs text-zinc-400 mt-0.5">Trade {payload.trade_id} · ${payload.amount.toLocaleString()}</p>
         </div>
         <span className={`text-xs px-2 py-1 rounded font-medium ${risk.badge}`}>
@@ -137,8 +184,8 @@ export function DecisionSurface({ status, interruptPayload, onDecision }: Props)
             />
           </div>
           {isLowConfidence && (
-            <p className="text-xs text-red-400 mt-1.5">
-              ⚠️ Confidence below 70% — review investigation reasoning carefully before approving.
+            <p className="text-xs text-red-400 mt-2 p-2 bg-red-400/10 rounded border border-red-400/20">
+              🚫 Cannot approve at this confidence level. Modify or escalate.
             </p>
           )}
         </div>
@@ -156,22 +203,79 @@ export function DecisionSurface({ status, interruptPayload, onDecision }: Props)
           <p className="text-xs text-zinc-300 leading-relaxed">{payload.investigation_summary}</p>
         </div>
 
-        {/* Modify/Reject input */}
-        {(mode === "modify" || mode === "reject") && (
+        {/* Phase 4: Operator ID (audit capture) */}
+        {(mode === "review" || mode === "modify" || mode === "reject" || mode === "escalate") && (
+          <div className="bg-zinc-800/40 rounded-lg p-3 border border-zinc-700/30">
+            <label className="text-xs text-zinc-400 block mb-2">Your Operator ID</label>
+            <input
+              type="text"
+              value={operatorId}
+              onChange={(e) => setOperatorId(e.target.value)}
+              placeholder="e.g., ops_johndoe"
+              className="w-full bg-zinc-700 border border-zinc-600 rounded px-2 py-1 text-xs text-zinc-100 placeholder-zinc-500"
+            />
+          </div>
+        )}
+
+        {/* Modify/Reject/Escalate input */}
+        {mode === "modify" && (
           <div>
-            <label className="text-xs text-zinc-400 block mb-1.5">
-              {mode === "modify" ? "Modification instruction (required)" : "Rejection reason (required)"}
-            </label>
+            <label className="text-xs text-zinc-400 block mb-1.5">Modification instruction (required)</label>
             <textarea
               autoFocus
               rows={3}
               value={inputText}
               onChange={e => setInputText(e.target.value)}
-              placeholder={
-                mode === "modify"
-                  ? "Describe what the agent should do differently…"
-                  : "Why is this proposal incorrect?"
-              }
+              placeholder="Describe what the agent should do differently…"
+              className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 resize-none"
+            />
+          </div>
+        )}
+
+        {mode === "reject" && (
+          <div>
+            <label className="text-xs text-zinc-400 block mb-1.5">Rejection reason (required)</label>
+            <textarea
+              autoFocus
+              rows={3}
+              value={inputText}
+              onChange={e => setInputText(e.target.value)}
+              placeholder="Why is this proposal incorrect?"
+              className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 resize-none"
+            />
+          </div>
+        )}
+
+        {mode === "escalate" && (
+          <div>
+            <label className="text-xs text-zinc-400 block mb-2">Escalation Category</label>
+            <div className="space-y-2">
+              {ESCALATION_CATEGORIES.map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setEscalationCategory(cat)}
+                  className={`w-full text-left px-3 py-2 text-xs rounded-lg border transition-all ${
+                    escalationCategory === cat
+                      ? "bg-orange-500/30 border-orange-500 text-orange-200"
+                      : "bg-zinc-800 border-zinc-700 text-zinc-300 hover:border-orange-500/50"
+                  }`}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Decision reason (audit) */}
+        {(mode === "modify" || mode === "reject" || mode === "escalate") && (
+          <div>
+            <label className="text-xs text-zinc-400 block mb-1.5">Decision Reason (Audit)</label>
+            <textarea
+              rows={2}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Why are you making this decision?"
               className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 resize-none"
             />
           </div>
@@ -183,18 +287,23 @@ export function DecisionSurface({ status, interruptPayload, onDecision }: Props)
         {mode === "review" && (
           <>
             <div className="grid grid-cols-2 gap-2">
-              {/* Approve */}
+              {/* Approve - confidence gated */}
               <button
-                disabled={submitting}
+                disabled={!canApprove || submitting}
                 onClick={() => handleSubmit("approve")}
-                className="py-2 px-3 rounded-lg bg-green-600 hover:bg-green-500 text-white text-xs font-semibold transition-colors disabled:opacity-50"
+                className={`py-2 px-3 rounded-lg text-white text-xs font-semibold transition-all ${
+                  canApprove
+                    ? "bg-green-600 hover:bg-green-500"
+                    : "bg-zinc-700 cursor-not-allowed opacity-40"
+                }`}
+                title={!canApprove ? "Confidence too low to approve" : ""}
               >
                 ✓ Approve
               </button>
               {/* Escalate */}
               <button
                 disabled={submitting}
-                onClick={() => handleSubmit("escalate")}
+                onClick={() => setMode("escalate")}
                 className="py-2 px-3 rounded-lg bg-orange-600/80 hover:bg-orange-500 text-white text-xs font-semibold transition-colors disabled:opacity-50"
               >
                 ↑ Escalate
@@ -219,20 +328,31 @@ export function DecisionSurface({ status, interruptPayload, onDecision }: Props)
           </>
         )}
 
-        {(mode === "modify" || mode === "reject") && (
+        {(mode === "modify" || mode === "reject" || mode === "escalate") && (
           <div className="grid grid-cols-2 gap-2">
             <button
-              onClick={() => { setMode("review"); setInputText("") }}
+              onClick={() => {
+                setMode("review")
+                setInputText("")
+                setReason("")
+                setEscalationCategory(null)
+              }}
               className="py-2 px-3 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-zinc-200 text-xs font-semibold transition-colors"
             >
               ← Back
             </button>
             <button
-              disabled={!inputText.trim() || submitting}
-              onClick={() => handleSubmit(mode === "modify" ? "modify" : "reject")}
+              disabled={(mode !== "escalate" && !inputText.trim()) || !operatorId.trim() || submitting}
+              onClick={() => handleSubmit(mode as DecisionAction)}
               className="py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold transition-colors disabled:opacity-40"
             >
-              {submitting ? "Submitting…" : mode === "modify" ? "Submit Modification" : "Send for Reinvestigation"}
+              {submitting
+                ? "Submitting…"
+                : mode === "modify"
+                  ? "Submit Modification"
+                  : mode === "reject"
+                    ? "Send for Reinvestigation"
+                    : "Escalate"}
             </button>
           </div>
         )}

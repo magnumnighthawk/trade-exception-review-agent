@@ -14,6 +14,8 @@ Streaming is always a separate concern (stream.py).
 
 HITL: This endpoint is the human's "write" action. Every call here is
 logged in the agent's audit trail via the human_decision state field.
+
+Phase 4: Enhanced to log decisions to audit_store for compliance.
 """
 
 import logging
@@ -25,6 +27,7 @@ from langgraph.types import Command
 from backend.agent.graph import graph
 from backend.api.models import HumanDecisionRequest, DecisionResponse
 from backend.api.state_store import state_store
+from backend.api.audit_store import audit_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/review", tags=["review"])
@@ -45,6 +48,7 @@ async def submit_decision(thread_id: str, req: HumanDecisionRequest):
     - Errors
 
     We handle all three outcomes and update state_store accordingly.
+    Phase 4: Also log the decision to the immutable audit trail.
     """
     entry = state_store.get(thread_id)
     if not entry:
@@ -67,6 +71,23 @@ async def submit_decision(thread_id: str, req: HumanDecisionRequest):
     }
 
     logger.info(f"[decision] Thread {thread_id}: operator {req.operator_id} → {req.action}")
+
+    # Phase 4: Log decision to audit trail BEFORE resuming
+    # This ensures we record the decision even if the agent crashes
+    interrupt_payload = entry.get("interrupt_payload") or {}
+    proposal = interrupt_payload.get("proposal") or {}
+    
+    audit_store.log_decision(
+        thread_id=thread_id,
+        trade_id=entry["trade_id"],
+        operator_id=req.operator_id,
+        decision=req.action,
+        modification=req.modification,
+        reason=req.reason,
+        confidence_before=req.confidence_before or interrupt_payload.get("confidence"),
+        agent_proposal_before=proposal.get("action"),
+        escalation_category=req.escalation_category,
+    )
 
     # Mark as resuming before invoking so the queue shows the right status
     state_store.set_resuming(thread_id)
