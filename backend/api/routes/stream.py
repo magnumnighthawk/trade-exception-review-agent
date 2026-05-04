@@ -36,8 +36,10 @@ from backend.agent.fixtures import get_exception
 from backend.api.models import (
     StartReviewRequest, StartReviewResponse,
     TokenEvent, NodeStartEvent, NodeCompleteEvent, HitlInterruptEvent, CompleteEvent, ErrorEvent,
+    CheckpointStateResponse,
 )
 from backend.api.state_store import state_store
+from backend.checkpointer import checkpointer_backend
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/review", tags=["review"])
@@ -116,6 +118,46 @@ async def start_review(req: StartReviewRequest):
 
     logger.info(f"[start_review] New thread {thread_id} for {req.trade_id}")
     return StartReviewResponse(thread_id=thread_id, trade_id=req.trade_id)
+
+
+@router.get("/{thread_id}/checkpoint", response_model=CheckpointStateResponse)
+async def checkpoint_state(thread_id: str):
+    """
+    Inspect checkpoint metadata for a specific thread.
+
+    LEARNING: This endpoint is Phase 3's visibility surface for pause/resume.
+    It helps answer: "Is this thread actually checkpointed and waiting?"
+    """
+    entry = state_store.get(thread_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = graph.get_state(config)
+    values = getattr(snapshot, "values", None) or {}
+    next_node = getattr(snapshot, "next", None)
+    tasks = getattr(snapshot, "tasks", None) or []
+
+    interrupt_count = 0
+    for task in tasks:
+        interrupt_count += len(getattr(task, "interrupts", None) or [])
+
+    has_checkpoint = bool(values) or bool(tasks) or bool(next_node)
+
+    normalized_next_node = next_node
+    if isinstance(next_node, (tuple, list)):
+        normalized_next_node = next_node[0] if len(next_node) > 0 else None
+
+    return CheckpointStateResponse(
+        thread_id=thread_id,
+        has_checkpoint=has_checkpoint,
+        has_interrupt=interrupt_count > 0,
+        interrupt_count=interrupt_count,
+        next_node=normalized_next_node,
+        status=values.get("status"),
+        state_keys=sorted(list(values.keys())),
+        checkpointer_backend=checkpointer_backend(),
+    )
 
 
 # ── SSE stream ─────────────────────────────────────────────────────────────────

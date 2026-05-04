@@ -155,3 +155,21 @@ class QueueItem(BaseModel):
 class QueueResponse(BaseModel):
     items: list[QueueItem]
     total: int
+
+
+class CheckpointStateResponse(BaseModel):
+    """
+    Lightweight checkpoint inspection payload.
+
+    LEARNING: This response exposes a safe subset of LangGraph checkpoint
+    internals so operators (and learners) can see whether a thread is paused,
+    what node it was on, and which state keys currently exist.
+    """
+    thread_id: str
+    has_checkpoint: bool
+    has_interrupt: bool
+    interrupt_count: int
+    next_node: Optional[str] = None
+    status: Optional[str] = None
+    state_keys: list[str] = Field(default_factory=list)
+    checkpointer_backend: str

@@ -23,7 +23,6 @@ LangGraph compiles this into a runnable that you invoke like:
 
 import logging
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 
 from backend.agent.state import TradeExceptionState
 from backend.agent.nodes import (
@@ -32,6 +31,7 @@ from backend.agent.nodes import (
     propose_resolution_node,
     execute_resolution_node,
 )
+from backend.checkpointer import build_checkpointer, checkpointer_backend
 
 logger = logging.getLogger(__name__)
 
@@ -84,18 +84,13 @@ def build_graph():
     the exact shape of state that will flow through the graph.
     Type checking at graph definition time catches state key mismatches early.
 
-    The compilation step (workflow.compile()) is where you attach:
-    - checkpointer: enables pause/resume (required for HITL)
-    - interrupt_before: always-interrupt gates (alternative to interrupt() in nodes)
+    The compilation step (workflow.compile()) is where you attach the
+    checkpointer — this is the core of HITL pause/resume in Phase 3.
 
-    We use interrupt() inside nodes (in propose_resolution_node) rather than
-    interrupt_before at the graph level. Both work, but the in-node approach
-    gives you more control — you can pass contextual data to the interrupt
-    and receive the human's response directly as a return value.
-
-    TRADE-OFF: interrupt_before=["execute_resolution"] at graph level is simpler
-    and is a safe default safety net. We use both in Phase 3. For Phase 1,
-    the in-node interrupt() in propose_resolution_node is enough.
+    We intentionally use interrupt() inside propose_resolution_node rather than
+    graph-level interrupt_before. The in-node pattern lets us provide rich
+    proposal context in the interrupt payload and accept the human decision
+    as the direct return value of interrupt().
     """
     workflow = StateGraph(TradeExceptionState)
 
@@ -132,13 +127,11 @@ def build_graph():
 
     # ── Compile with checkpointer ──────────────────────────────────────────────
     # LEARNING: The checkpointer is what makes HITL possible.
-    # MemorySaver stores state in Python dicts — fine for development.
-    # PRODUCTION: Replace with AsyncPostgresSaver from langgraph-checkpoint-postgres
-    # so state survives process restarts and scales across instances.
-    checkpointer = MemorySaver()
+    # Phase 3 keeps this behind a factory so we can switch storage backend via env.
+    checkpointer = build_checkpointer()
 
     graph = workflow.compile(checkpointer=checkpointer)
-    logger.info("[graph] Trade Exception Review Agent graph compiled")
+    logger.info("[graph] Trade Exception Review Agent graph compiled (checkpointer=%s)", checkpointer_backend())
     return graph
 
 
