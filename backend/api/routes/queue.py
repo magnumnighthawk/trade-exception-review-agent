@@ -183,10 +183,12 @@ async def submit_audit_entry(req: SubmitDecisionRequest):
     if not entry:
         raise HTTPException(status_code=404, detail=f"Thread {req.thread_id} not found")
 
+    trade_id = entry.get("trade_id", "unknown")
+
     # Log to audit trail (append-only)
     audit_entry = audit_store.log_decision(
         thread_id=req.thread_id,
-        trade_id=req.trade_id,
+        trade_id=trade_id,
         operator_id=req.operator_id,
         decision=req.decision,
         modification=req.modification,
