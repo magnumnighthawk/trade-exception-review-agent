@@ -130,14 +130,17 @@ export interface HumanDecision {
   action: DecisionAction
   modification: string | null
   operator_id: string
+  reason?: string | null
+  confidence_before?: number | null
+  escalation_category?: string | null
 }
 
 // ── Queue item ─────────────────────────────────────────────────────────────────
 
 export interface QueueItem {
-  thread_id: string
+  thread_id: string | null
   trade_id: string
-  status: AgentStatus
+  status: AgentStatus | "running"
   risk_level: "low" | "medium" | "high" | "critical" | null
   confidence: number | null
   amount: number | null

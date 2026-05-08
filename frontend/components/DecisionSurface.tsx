@@ -96,7 +96,7 @@ export function DecisionSurface({ status, interruptPayload, onDecision }: Props)
         reason: reason.trim() || null,
         confidence_before: payload.confidence,
         escalation_category: escalationCategory || null,
-      } as any)  // Type assertion for Phase 4 fields
+      })
     } finally {
       setSubmitting(false)
       setMode("review")

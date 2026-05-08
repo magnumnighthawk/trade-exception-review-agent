@@ -1,5 +1,7 @@
 # Phase 2 — Streaming & The Supervision Cockpit
 
+> **Phase 4 note:** `useAgentStream` (built in this phase) was superseded in Phase 4 by `useSupervisionThreads`. The single-session model here is intentional as a learning step — it teaches you exactly what needs to change when you scale from one active review to many concurrent ones. Read this phase first, then see `phase-4-supervision-ui.md` for the multi-thread evolution.
+
 ## What You Built
 
 A live supervision cockpit where:

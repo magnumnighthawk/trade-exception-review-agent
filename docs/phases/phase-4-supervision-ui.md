@@ -1,5 +1,75 @@
 # Phase 4 — Supervision Interface: The Operator's Cockpit
 
+> **Status: ✅ Built.** The implementation diverged from the original spec in one important way: we built **true multi-thread supervision** from the start, not a single-review-at-a-time flow upgraded incrementally. The sections below retain the design intent but the "What Was Actually Built" section documents the actual code.
+
+---
+
+## What Was Actually Built
+
+### The Gap We Fixed
+
+The prior implementation had one fatal flaw: `useAgentStream` was a **single-session hook**. It tracked exactly one active review. Switching to a different trade in the queue would reset all state — tokens, node history, interrupt payload — for the trade you were watching. Every queue item that started a review replaced the previous one.
+
+This made the "queue" cosmetic rather than functional. The queue showed sample data, clicking a row didn't independently launch an agent, and there was no way to supervise multiple exceptions simultaneously.
+
+### What Changed
+
+**Frontend: `hooks/useSupervisionThreads.ts`** (replaces `useAgentStream`)
+
+The central architectural change: thread state is now a `Record<threadId, ThreadSession>` map instead of a single set of state variables.
+
+```typescript
+// Each thread has its own independent session
+type ThreadSession = {
+  threadId: string
+  tradeId: string
+  status: AgentStatus | "running"
+  tokens: string           // that thread's accumulated LLM output
+  nodeHistory: string[]    // nodes this thread has passed through
+  interruptPayload: InterruptPayload | null  // set when waiting_human
+  finalState: Partial<AgentStateSnapshot> | null
+  error: string | null
+}
+
+// Multiple SSE streams open simultaneously, one per running thread
+const streamRefs = useRef<Record<string, EventSource>>({})
+```
+
+When you select a queue row, you change `selectedThreadId` — this is a *view* change only. The selected thread's session is read from the map and fed to the reasoning/decision panels. Other threads continue streaming independently.
+
+```
+TRD-9821: waiting_human ← operator is looking at this one
+TRD-9834: streaming      ← agent still running, stream open
+TRD-9855: idle           ← not started yet
+TRD-9841: complete       ← done, session preserved in map
+```
+
+**Frontend: `components/ExceptionQueue.tsx`** (rebuilt)
+
+- All dummy `SAMPLE_EXCEPTIONS` removed — queue now renders real backend data
+- Each row has `▶ Run` / `↺ Reset` controls
+  - `▶ Run` — enabled only for `idle` rows. Calls `POST /review/start`, registers a thread, opens SSE stream, switches view to that thread
+  - `↺ Reset` — enabled only for rows with a `thread_id`. Calls `POST /review/{id}/reset`, removes thread from state store, trade returns to `idle` in queue
+- Selection highlights by `thread_id` (for started trades) or `trade_id` (for pending)
+- No interaction resets another thread's stream or state
+
+**Backend: `api/routes/queue.py`** (updated `GET /queue/`)
+
+- Queue now surfaces both **pending** exceptions (from fixtures, no thread yet) and **active** threads (from `state_store`)
+- Deduplicated to the latest thread per trade — stale threads from previous runs don't clutter the queue
+- Sort order: `waiting_human → streaming/running → idle → complete → escalated → error`, then by confidence (low first), amount (high first), age (old first)
+
+**Backend: `api/routes/stream.py`** (two additions)
+
+- `POST /review/start` is now **idempotent per trade**: if a thread for that trade is already active (not complete/error), the same `thread_id` is returned rather than spawning a duplicate
+- `POST /review/{thread_id}/reset`: removes a thread entry from `state_store`, returning that trade to `idle` in the queue
+
+**Backend: `api/models.py`**
+
+- `QueueItem.thread_id` is now `Optional[str]` — pending exceptions have no thread yet
+
+---
+
 ## The Mental Model
 
 By Phase 3, we built a **single-threaded agent supervision flow**: start an exception → stream reasoning → hit interrupt → checkpoint → human decision → resume.
@@ -582,25 +652,29 @@ For Phase 4, we'll use in-memory storage (list of dicts), with a TODO to migrate
 
 ---
 
-## What to Build in Phase 4
+## What Was Built vs What Remains
 
 ### Backend
-1. `GET /queue/waiting` — Return all paused exceptions with sorting
-2. `GET /queue/audit` — Return audit history for a thread
-3. `POST /queue/audit` — Log a decision
-4. Enhance `TradeExceptionState` with `audit_log` and `human_decision` fields
-5. Update `decision.py` to log decisions to audit trail
+- ✅ `GET /queue/` — Returns all exceptions (pending + active), deduplicated, sorted by operational priority
+- ✅ `GET /queue/waiting` — Returns only `waiting_human` threads
+- ✅ `GET /queue/audit/{thread_id}` — Audit history for a thread
+- ✅ `POST /queue/audit` — Log a decision to the immutable audit trail
+- ✅ `POST /review/start` — Idempotent per trade; reuses active thread
+- ✅ `POST /review/{thread_id}/reset` — Returns a trade to pending/idle
+- ✅ `TradeExceptionState` with `audit_log` and `human_decision` fields
+- ✅ `decision.py` logs every decision to `audit_store` before resuming the graph
 
 ### Frontend
-1. **ExceptionQueue.tsx** — Enhanced with polling, risk badges, click-to-select
-2. **WorkflowTimeline.tsx** — Show node execution timeline
-3. **DecisionSurface.tsx** — Add confidence gate, modification input, audit fields
-4. **useExceptionQueue.ts** — Hook for polling `/queue/waiting`
-5. **hooks/useAuditLog.ts** — Hook for submitting decision to `/queue/audit`
+- ✅ **`useSupervisionThreads.ts`** — Multi-thread hook: per-session state map, concurrent SSE streams, independent decisions per thread
+- ✅ **`ExceptionQueue.tsx`** — Real backend queue, risk/confidence badges, `▶ Run` / `↺ Reset` per row, no dummy data
+- ✅ **`DecisionSurface.tsx`** — Confidence gating (block approve below 0.70), modify/reject/escalate/approve, audit fields
+- ✅ **`dashboard/page.tsx`** — Wired to `useSupervisionThreads`; selected session feeds reasoning and decision panels
+- ⬜ **`WorkflowTimeline.tsx`** — Component exists but not yet wired to per-thread session data from `useSupervisionThreads`
+- ⬜ **`hooks/useAuditLog.ts`** — Separate audit log hook (decisions currently logged server-side via `decision.py`; frontend hook for read-side not yet built)
 
 ### Documentation
-1. **phase-4-supervision-ui.md** — This file (conceptual walkthrough)
-2. **concept checks** in docs for interview prep
+- ✅ **phase-4-supervision-ui.md** — Updated to reflect actual implementation
+- ✅ **plan.md** — Updated with Phase 4 status and multi-thread approach
 
 ---
 

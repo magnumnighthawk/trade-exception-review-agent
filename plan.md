@@ -245,19 +245,23 @@ async def submit_decision(thread_id: str, decision: HumanDecision):
 ## Phase 4 — The Supervision Interface
 ### Goal: Build the actual HITL UI — the cockpit
 ### Time: 1–2 days
+### Status: ✅ BUILT
 
 This is what the role is actually about. Three panels:
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │  PANEL 1: QUEUE          │  PANEL 2: AGENT REASONING│
-│  All paused exceptions   │  Streaming thought process│
-│  Sorted by confidence    │  Tool calls made          │
-│  + urgency               │  Evidence gathered        │
+│  All exceptions (pending │  Streaming thought process│
+│  + in-flight + paused)   │  per selected thread      │
+│  ▶ Run  ↺ Reset per row  │  Node pipeline status     │
 ├──────────────────────────┤                           │
-│  TRD-9821 🔴 CRITICAL   │  "Investigating IBAN...   │
-│  TRD-9834 🟡 MEDIUM     │   Found mismatch in...   │
-│  TRD-9841 🟢 LOW        │   Confidence: 72%"        │
+│  TRD-9821 🔴 HIGH       │  "Investigating IBAN...   │
+│  ⚡ Awaiting Review      │   Found mismatch in...    │
+│  TRD-9834 🟡 MEDIUM     │   Confidence: 72%"        │
+│  Investigating…          │                           │
+│  TRD-9841 🟢 LOW        │                           │
+│  Awaiting Run            │                           │
 └──────────────────────────┴───────────────────────────┘
 │  PANEL 3: DECISION SURFACE                           │
 │  Proposed: Update IBAN to GB29... and retry          │
@@ -265,63 +269,70 @@ This is what the role is actually about. Three panels:
 └──────────────────────────────────────────────────────┘
 ```
 
-**The Decision Surface component:**
+**The key architectural shift from single- to multi-thread supervision:**
+
+Phase 2/3 used `useAgentStream` — a single-session hook that tracked one active review at a time. Selecting a different trade reset all state.
+
+Phase 4 replaces this with `useSupervisionThreads`, which:
+- Maintains independent per-thread sessions keyed by `thread_id`
+- Opens concurrent SSE streams (multiple exceptions run in parallel)
+- Selecting a thread only changes the *view* — not the thread's state
+- Each thread independently progresses: `idle → starting → streaming → waiting_human → complete`
 
 ```typescript
-function DecisionSurface({ proposal, threadId, confidence }) {
-  const [mode, setMode] = useState<"review"|"modify">("review")
-  const [modification, setModification] = useState("")
+// hooks/useSupervisionThreads.ts
+// Each session is independently tracked in a Record<threadId, ThreadSession>
+type ThreadSession = {
+  threadId: string
+  status: AgentStatus | "running"
+  tokens: string          // that thread's streaming output
+  nodeHistory: string[]
+  interruptPayload: InterruptPayload | null  // set when waiting_human
+  finalState: Partial<AgentStateSnapshot> | null
+}
 
-  const submitDecision = async (action: "approve"|"reject"|"modify"|"escalate") => {
-    await fetch(`/decision/${threadId}`, {
-      method: "POST",
-      body: JSON.stringify({ 
-        action, 
-        modification: action === "modify" ? modification : null 
-      })
-    })
-  }
+// Multiple SSE streams open simultaneously:
+const streamRefs = useRef<Record<string, EventSource>>({})
 
-  return (
-    <div className="decision-surface">
-      {/* Confidence indicator — critical for operator trust */}
-      <ConfidenceBar value={confidence} />
-      
-      {/* Low confidence warning */}
-      {confidence < 0.7 && (
-        <Alert>Agent confidence is low — review reasoning carefully</Alert>
-      )}
-      
-      <ProposedResolution text={proposal} />
-      
-      {mode === "modify" && (
-        <ModificationInput 
-          value={modification}
-          onChange={setModification}
-          placeholder="Describe your modification..."
-        />
-      )}
-      
-      <div className="actions">
-        <button onClick={() => submitDecision("approve")}>✓ Approve</button>
-        <button onClick={() => submitDecision("reject")}>✗ Reject</button>
-        <button onClick={() => setMode("modify")}>✎ Modify</button>
-        <button onClick={() => submitDecision("escalate")}>↑ Escalate</button>
-      </div>
-    </div>
-  )
+// Switching threads only changes selectedThreadId — does NOT close/reset others
+const selectQueueItem = (item: QueueItem) => {
+  setSelectedTradeId(item.trade_id)
+  if (item.thread_id) setSelectedThreadId(item.thread_id)
 }
 ```
 
+**Queue is real, not mocked — fed from the backend:**
+
+```
+GET /queue/       → returns pending exceptions (from fixtures) + active threads
+                    deduplicated to latest thread per trade
+                    sorted: waiting_human → streaming → idle → complete
+
+POST /review/start → idempotent: reuses active thread for same trade
+                     creates new thread only if previous is complete/error
+
+POST /review/{thread_id}/reset → removes thread from state_store,
+                                  trade returns to idle/pending in queue
+```
+
+**Per-row `▶ Run` / `↺ Reset` controls:**
+- `▶ Run` is only enabled for `idle` (pending) exceptions — clicking it calls `POST /review/start`, registers a thread, opens an SSE stream
+- `↺ Reset` calls `POST /review/{thread_id}/reset`, tears down the session, returns trade to pending
+- Both are independent per-row — resetting TRD-9821 does not affect TRD-9834's in-flight stream
+
 **What you learn in Phase 4:**
-- How confidence scores drive UI behaviour — not just display
+- The difference between single-session and fleet supervision — one hook manages many concurrent SSE streams
+- How `thread_id` is used as a session key to keep per-thread state isolated in the frontend
+- How confidence scores drive UI behaviour — not just display (approval gating at 0.70)
 - The four human actions (approve/reject/modify/escalate) and what each means downstream
-- How a queue of paused agents is managed — this is the "fleet supervision" the JD mentions
+- How a queue of pending + paused + in-flight agents is managed — this is the "fleet supervision" the JD mentions
 - Why audit trail matters in regulated environments — log every decision with timestamp + operator ID
 
 **The key insight to absorb:**
 
 > The modify path is the most interesting HITL pattern. The human isn't just approving or rejecting — they're steering the agent mid-flight. That modified input goes back into the agent's state and changes what it does next. That's steering, not just oversight.
+
+> The second key insight: switching threads in a multi-agent supervision UI must be stateless from the agent's perspective. The agent doesn't know you're looking at it. `thread_id` is the only connection between the UI and the checkpointed agent. The UI can switch views freely without disturbing any running stream.
 
 ---
 
@@ -458,10 +469,14 @@ That's an answer that earns respect.
 ## Your Day-By-Day Plan
 
 ```
-Day 1   → Phase 1: LangGraph agent, state design, confidence scores
-Day 2   → Phase 2: FastAPI streaming, React SSE hook, status machine
-Day 3   → Phase 3: LangGraph interrupts, checkpointer, resume endpoint
-Day 4   → Phase 4: Supervision UI — queue, reasoning panel, decision surface
+Day 1   → Phase 1: LangGraph agent, state design, confidence scores          ✅ DONE
+Day 2   → Phase 2: FastAPI streaming, React SSE hook, status machine          ✅ DONE
+Day 3   → Phase 3: LangGraph interrupts, checkpointer, resume endpoint        ✅ DONE
+Day 4   → Phase 4: Multi-thread supervision UI                                ✅ DONE
+            - useSupervisionThreads: per-thread sessions, concurrent SSE streams
+            - ExceptionQueue: real backend queue, ▶ Run / ↺ Reset per row
+            - Queue API: pending + active exceptions, dedup, idempotent start
+            - DecisionSurface: confidence gating, modify/reject/escalate/approve
 Day 5   → Phase 5: Sad paths and failure handling
 Day 6   → Phase 6: Vercel AI SDK / CopilotKit exploration on top
 Day 7-8 → Polish + practice explaining it out loud

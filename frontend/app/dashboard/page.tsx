@@ -19,38 +19,28 @@
 
 "use client"
 
-import { useAgentStream } from "@/hooks/useAgentStream"
+import { useSupervisionThreads } from "@/hooks/useSupervisionThreads"
 import { ExceptionQueue } from "@/components/ExceptionQueue"
 import { AgentReasoning } from "@/components/AgentReasoning"
 import { DecisionSurface } from "@/components/DecisionSurface"
-import { useState } from "react"
 
 export default function DashboardPage() {
   const {
-    status,
-    tokens,
-    currentNode,
-    nodeHistory,
-    interruptPayload,
-    finalState,
-    error,
-    startReview,
+    queueItems,
+    isQueueLoading,
+    queueError,
+    selectedThreadId,
+    selectedTradeId,
+    selectedSession,
+    selectQueueItem,
+    runTradeReview,
+    resetThread,
     submitDecision,
-    reset,
-  } = useAgentStream()
+  } = useSupervisionThreads()
 
-  const [activeTradeId, setActiveTradeId] = useState<string | null>(null)
-
-  const handleSelectTrade = async (tradeId: string) => {
-    // If a review is already running, reset first
-    if (status !== "idle") {
-      reset()
-      // Small delay to let state settle before starting new review
-      await new Promise(r => setTimeout(r, 100))
-    }
-    setActiveTradeId(tradeId)
-    await startReview(tradeId)
-  }
+  const selectedStatus = selectedSession?.status === "running"
+    ? "streaming"
+    : (selectedSession?.status ?? "idle")
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
@@ -62,14 +52,14 @@ export default function DashboardPage() {
           <span className="text-xs text-zinc-600 font-mono">Phase 2 — Supervision Cockpit</span>
         </div>
         <div className="flex items-center gap-4">
-          {error && (
+          {queueError && (
             <span className="text-xs text-red-400 bg-red-400/10 border border-red-400/20 px-2 py-1 rounded">
-              {error}
+              {queueError}
             </span>
           )}
-          {status !== "idle" && (
+          {selectedThreadId && (
             <button
-              onClick={reset}
+              onClick={() => resetThread(selectedThreadId)}
               className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
             >
               Reset
@@ -84,23 +74,27 @@ export default function DashboardPage() {
 
         {/* Panel 1 — Exception Queue */}
         <ExceptionQueue
-          selectedThreadId={activeTradeId}
-          agentStatus={status}
-          onSelectThread={handleSelectTrade}
+          items={queueItems}
+          isLoading={isQueueLoading}
+          selectedTradeId={selectedTradeId}
+          selectedThreadId={selectedThreadId}
+          onSelectItem={selectQueueItem}
+          onRunTrade={runTradeReview}
+          onResetThread={resetThread}
         />
 
         {/* Panel 2 — Agent Reasoning */}
         <AgentReasoning
-          status={status}
-          tokens={tokens}
-          currentNode={currentNode}
-          nodeHistory={nodeHistory}
+          status={selectedStatus}
+          tokens={selectedSession?.tokens ?? ""}
+          currentNode={selectedSession?.currentNode ?? null}
+          nodeHistory={selectedSession?.nodeHistory ?? []}
         />
 
         {/* Panel 3 — Decision Surface */}
         <DecisionSurface
-          status={status}
-          interruptPayload={interruptPayload}
+          status={selectedStatus}
+          interruptPayload={selectedSession?.interruptPayload ?? null}
           onDecision={submitDecision}
         />
 

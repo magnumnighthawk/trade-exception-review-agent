@@ -106,6 +106,18 @@ async def start_review(req: StartReviewRequest):
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
+    # LEARNING: make start idempotent per trade while the trade is still active,
+    # so repeated "Run" clicks don't create duplicate thread rows in the queue.
+    existing = state_store.latest_for_trade(req.trade_id)
+    if existing and existing.get("status") not in {"complete", "escalated", "error"}:
+        thread_id = existing["thread_id"]
+        logger.info(f"[start_review] Reusing active thread {thread_id} for {req.trade_id}")
+        return StartReviewResponse(
+            thread_id=thread_id,
+            trade_id=req.trade_id,
+            message="Existing active thread reused for this trade.",
+        )
+
     import uuid
     thread_id = str(uuid.uuid4())
 
@@ -118,6 +130,29 @@ async def start_review(req: StartReviewRequest):
 
     logger.info(f"[start_review] New thread {thread_id} for {req.trade_id}")
     return StartReviewResponse(thread_id=thread_id, trade_id=req.trade_id)
+
+
+@router.post("/{thread_id}/reset")
+async def reset_thread(thread_id: str):
+    """
+    Reset one queue thread entry so the trade can be run again from scratch.
+
+    LEARNING: this clears UI-visible state for one thread only; other running
+    threads are unaffected, which is essential for multi-thread supervision.
+    """
+    entry = state_store.get(thread_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+    trade_id = entry.get("trade_id")
+    state_store.remove(thread_id)
+    logger.info(f"[reset_thread] Removed thread {thread_id} for trade {trade_id}")
+    return {
+        "thread_id": thread_id,
+        "trade_id": trade_id,
+        "status": "idle",
+        "message": "Thread reset. Trade returned to pending queue.",
+    }
 
 
 @router.get("/{thread_id}/checkpoint", response_model=CheckpointStateResponse)

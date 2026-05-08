@@ -144,7 +144,7 @@ class QueueItem(BaseModel):
     renders for each paused agent. Sort by risk_level + confidence to give
     operators the most urgent cases first.
     """
-    thread_id: str
+    thread_id: Optional[str] = None
     trade_id: str
     status: str
     risk_level: Optional[str] = None

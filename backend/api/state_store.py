@@ -49,9 +49,25 @@ class AgentStateStore:
         with self._lock:
             return self._store.get(thread_id)
 
+    def get_by_trade(self, trade_id: str) -> list[dict]:
+        with self._lock:
+            return [entry for entry in self._store.values() if entry.get("trade_id") == trade_id]
+
+    def latest_for_trade(self, trade_id: str) -> Optional[dict]:
+        with self._lock:
+            matches = [entry for entry in self._store.values() if entry.get("trade_id") == trade_id]
+            if not matches:
+                return None
+            matches.sort(key=lambda entry: entry.get("created_at") or "", reverse=True)
+            return matches[0]
+
     def all(self) -> list[dict]:
         with self._lock:
             return list(self._store.values())
+
+    def remove(self, thread_id: str):
+        with self._lock:
+            self._store.pop(thread_id, None)
 
     def set_current_node(self, thread_id: str, node: str):
         with self._lock:

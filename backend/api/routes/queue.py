@@ -24,6 +24,7 @@ to log and retrieve operator decisions for compliance.
 import logging
 from fastapi import APIRouter, HTTPException
 from backend.agent.graph import graph
+from backend.agent.fixtures import SAMPLE_EXCEPTIONS
 from backend.api.models import (
     QueueItem, QueueResponse, AuditEntryResponse, AuditLogResponse,
     SubmitDecisionRequest, SubmitDecisionResponse
@@ -48,13 +49,33 @@ async def get_queue():
     This means the most dangerous cases bubble to the top.
     """
     risk_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, None: 4}
+    status_order = {
+        "waiting_human": 0,
+        "resuming": 1,
+        "running": 2,
+        "starting": 2,
+        "idle": 3,
+        "complete": 4,
+        "escalated": 5,
+        "error": 6,
+    }
 
     entries = state_store.all()
-    items = []
+    latest_by_trade: dict[str, dict] = {}
+    for entry in entries:
+        trade_id = entry["trade_id"]
+        previous = latest_by_trade.get(trade_id)
+        if not previous or (entry.get("created_at") or "") > (previous.get("created_at") or ""):
+            latest_by_trade[trade_id] = entry
+
+    entries = list(latest_by_trade.values())
+    items: list[QueueItem] = []
+    active_trade_ids = set()
 
     for entry in entries:
         payload = entry.get("interrupt_payload") or {}
         proposal = payload.get("proposal") or {}
+        active_trade_ids.add(entry["trade_id"])
 
         items.append(QueueItem(
             thread_id=entry["thread_id"],
@@ -62,18 +83,38 @@ async def get_queue():
             status=entry["status"],
             risk_level=proposal.get("risk_level"),
             confidence=payload.get("confidence"),
-            amount=payload.get("amount"),
+            amount=payload.get("amount") or _get_amount(entry["trade_id"]),
             counterparty=_get_counterparty(entry["trade_id"]),
             proposal_action=proposal.get("action"),
             interrupt_payload=payload if entry["status"] == "waiting_human" else None,
             paused_at=entry.get("paused_at"),
         ))
 
-    # Sort: waiting_human first, then by risk level
-    items.sort(key=lambda x: (
-        0 if x.status == "waiting_human" else 1,
-        risk_order.get(x.risk_level, 4),
-        x.paused_at or "",
+    # HITL: Pending exceptions are visible before a run starts, so operators can
+    # launch multiple reviews concurrently from the supervision queue.
+    for trade_id, exception in SAMPLE_EXCEPTIONS.items():
+        if trade_id in active_trade_ids:
+            continue
+        items.append(QueueItem(
+            thread_id=None,
+            trade_id=trade_id,
+            status="idle",
+            risk_level=None,
+            confidence=None,
+            amount=exception.get("amount"),
+            counterparty=exception.get("counterparty"),
+            proposal_action=None,
+            interrupt_payload=None,
+            paused_at=None,
+        ))
+
+    # Queue policy: actionable items first, then by confidence, then by amount, then age.
+    items.sort(key=lambda item: (
+        status_order.get(item.status, 99),
+        item.confidence if item.confidence is not None else 1.0,
+        -(item.amount or 0.0),
+        item.paused_at or "",
+        risk_order.get(item.risk_level, 4),
     ))
 
     return QueueResponse(items=items, total=len(items))
@@ -117,6 +158,13 @@ def _get_counterparty(trade_id: str) -> str | None:
     try:
         from backend.agent.fixtures import get_exception
         return get_exception(trade_id).get("counterparty")
+    except Exception:
+        return None
+
+
+def _get_amount(trade_id: str) -> float | None:
+    try:
+        return float(SAMPLE_EXCEPTIONS.get(trade_id, {}).get("amount"))
     except Exception:
         return None
 
