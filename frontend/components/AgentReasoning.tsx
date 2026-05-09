@@ -3,20 +3,19 @@
  *
  * LEARNING: This is the "transparent agent" component. Operators can see
  * every token the LLM produces in real time, the node progression, and
- * the structured outputs (investigation findings, proposal details).
+ * the structured outputs captured at each stage.
  *
  * Two key design decisions to study:
  *
- * 1. STAGE HISTORY: We persist each node execution as its own reviewable stage.
- *    This lets operators time-travel through prior reasoning instead of losing
- *    context when the agent advances.
+ * 1. STAGE HISTORY: Each node execution is reviewable after the fact, so the
+ *    operator can inspect the exact state that led to a pause or outcome.
  *
- * 2. PROGRESSIVE DISCLOSURE: The node strip provides the bird's-eye view, while
- *    the selected-stage detail pane shows transcript + structured outputs only
- *    for the stage the operator is currently inspecting.
+ * 2. LIVE VS REVIEW STATE: A thread can be active, paused for HITL, or frozen
+ *    after completion. Those are different operator modes, and the UI should
+ *    not collapse them into one generic "running" treatment.
  *
- * HITL: When status === "waiting_human", this panel shifts from "watch the live
- * agent" to "review the evidence that led to the interruption."
+ * HITL: When status === "waiting_human", the current stage is no longer live.
+ * It becomes checkpoint evidence for the operator to review before deciding.
  */
 
 "use client"
@@ -39,33 +38,50 @@ interface Props {
   stageHistory: ThreadStageRecord[]
 }
 
+type StageTone = "live" | "paused" | "complete" | "error" | "neutral"
+
 export function AgentReasoning({ status, currentStageId, stageHistory }: Props) {
   const isActive = status === "streaming" || status === "resuming"
   const isPaused = status === "waiting_human"
+  const isTerminal = status === "complete" || status === "escalated"
   const [pinnedStageId, setPinnedStageId] = useState<string | null>(null)
 
   const latestStage = stageHistory.at(-1) ?? null
-  const liveStageId = currentStageId ?? latestStage?.id ?? null
-  const selectedStageId = pinnedStageId ?? liveStageId
+  const latestRunningStageId =
+    [...stageHistory].reverse().find((stage) => stage.status === "running")?.id ?? null
+
+  const liveStageId = isActive ? currentStageId ?? latestRunningStageId : null
+  const pausedStageId = isPaused ? latestRunningStageId ?? latestStage?.id ?? null : null
+  const selectedStageId = pinnedStageId ?? liveStageId ?? pausedStageId ?? latestStage?.id ?? null
   const selectedStage =
-    stageHistory.find((stage) => stage.id === selectedStageId) ??
-    latestStage
+    stageHistory.find((stage) => stage.id === selectedStageId) ?? latestStage
 
   const canFollowLive = Boolean(liveStageId && pinnedStageId && pinnedStageId !== liveStageId)
 
   const summaryText = useMemo(() => {
-    if (isPaused) return "Review the full stage trail before submitting a decision."
+    if (isPaused) return "Checkpoint captured. Review the trail that led to the human decision."
     if (isActive) return "Streaming live output while preserving earlier stages for review."
-    if (status === "complete" || status === "escalated") return "Investigation history is frozen for post-run review."
-    return "Select a trade to inspect the agent's stage-by-stage reasoning."
-  }, [isActive, isPaused, status])
+    if (isTerminal) return "Run complete. Inspect any stage to understand how the case closed."
+    return "Select a case to inspect the agent's stage-by-stage reasoning."
+  }, [isActive, isPaused, isTerminal])
+
+  const selectedStageTone = getStageTone(selectedStage, {
+    liveStageId,
+    pausedStageId,
+    isActive,
+    isPaused,
+    isTerminal,
+    isError: status === "error",
+    latestStageId: latestStage?.id ?? null,
+  })
+
+  const selectedStageLabel = getStageToneLabel(
+    selectedStageTone,
+    status === "escalated" && selectedStage?.id === latestStage?.id,
+  )
 
   return (
-    <section
-      className={`panel flex h-full min-h-[24rem] flex-col overflow-hidden rounded-[1.75rem] transition-opacity ${
-        isPaused ? "opacity-95" : "opacity-100"
-      }`}
-    >
+    <section className="panel flex h-full min-h-[24rem] flex-col overflow-hidden rounded-[1.75rem]">
       <header className="panel-header border-b border-line px-5 py-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -86,7 +102,12 @@ export function AgentReasoning({ status, currentStageId, stageHistory }: Props) 
             {isActive && (
               <span className="flex items-center gap-2 rounded-full border border-accent/25 bg-accent-soft px-3 py-1.5 text-xs font-medium text-accent">
                 <span className="status-dot h-2 w-2 animate-pulse rounded-full bg-accent" />
-                Live
+                Live stream
+              </span>
+            )}
+            {isPaused && (
+              <span className="rounded-full border border-[var(--warning-border)] bg-[var(--warning-soft)] px-3 py-1.5 text-xs font-medium text-[var(--warning-ink)]">
+                Awaiting decision
               </span>
             )}
           </div>
@@ -103,14 +124,22 @@ export function AgentReasoning({ status, currentStageId, stageHistory }: Props) 
                 icon: "•",
               }
               const isSelected = selectedStage?.id === stage.id
-              const isLiveStage = liveStageId === stage.id
+              const tone = getStageTone(stage, {
+                liveStageId,
+                pausedStageId,
+                isActive,
+                isPaused,
+                isTerminal,
+                isError: status === "error",
+                latestStageId: latestStage?.id ?? null,
+              })
 
               return (
                 <button
                   key={stage.id}
                   type="button"
                   onClick={() => {
-                    setPinnedStageId(isLiveStage ? null : stage.id)
+                    setPinnedStageId(stage.id === liveStageId ? null : stage.id)
                   }}
                   className={`min-w-[11rem] rounded-[1.15rem] border px-3 py-3 text-left ${
                     isSelected
@@ -121,15 +150,11 @@ export function AgentReasoning({ status, currentStageId, stageHistory }: Props) 
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-sm text-ink-strong">{nodeMeta.icon}</span>
                     <span
-                      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] ${
-                        stage.status === "complete"
-                          ? "bg-[var(--success-soft)] text-[var(--success-ink)]"
-                          : stage.status === "error"
-                            ? "bg-[var(--critical-soft)] text-[var(--critical-ink)]"
-                            : "bg-accent-soft text-accent"
-                      }`}
+                      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] ${getStageToneClass(
+                        tone,
+                      )}`}
                     >
-                      {stage.status}
+                      {getStageToneLabel(tone, status === "escalated" && stage.id === latestStage?.id)}
                     </span>
                   </div>
 
@@ -144,7 +169,7 @@ export function AgentReasoning({ status, currentStageId, stageHistory }: Props) 
           </div>
         ) : (
           <div className="rounded-[1.2rem] border border-dashed border-line-strong bg-surface px-4 py-4 text-xs leading-5 text-ink-muted">
-            The node strip will populate as the agent advances through its execution graph.
+            The stage trail will populate as the agent advances through its execution graph.
           </div>
         )}
       </div>
@@ -155,7 +180,16 @@ export function AgentReasoning({ status, currentStageId, stageHistory }: Props) 
             <section className="rounded-[1.45rem] border border-line bg-surface-elevated p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <p className="text-xs uppercase tracking-[0.18em] text-ink-soft">Selected stage</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-xs uppercase tracking-[0.18em] text-ink-soft">Selected stage</p>
+                    <span
+                      className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${getStageToneClass(
+                        selectedStageTone,
+                      )}`}
+                    >
+                      {selectedStageLabel}
+                    </span>
+                  </div>
                   <h3 className="mt-2 text-lg font-semibold text-ink-strong">
                     {(NODE_META[selectedStage.node] ?? { label: selectedStage.node }).label}
                   </h3>
@@ -174,23 +208,31 @@ export function AgentReasoning({ status, currentStageId, stageHistory }: Props) 
               <div className="mt-4 rounded-[1.2rem] border border-line bg-surface px-4 py-3">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-xs uppercase tracking-[0.18em] text-ink-soft">Transcript</p>
-                  {liveStageId === selectedStage.id && isActive && (
-                    <span className="text-xs font-medium text-accent">Actively streaming</span>
-                  )}
+                  <span className="text-xs font-medium text-ink-muted">
+                    {selectedStageTone === "live"
+                      ? "Actively streaming"
+                      : selectedStageTone === "paused"
+                        ? "Checkpointed for review"
+                        : isTerminal
+                          ? "Frozen after completion"
+                          : "Captured output"}
+                  </span>
                 </div>
 
                 {selectedStage.tokens ? (
                   <div className="mt-3 whitespace-pre-wrap font-mono text-[13px] leading-6 text-ink">
                     {selectedStage.tokens}
-                    {liveStageId === selectedStage.id && isActive && (
+                    {selectedStageTone === "live" && (
                       <span className="ml-1 inline-block h-4 w-2 animate-pulse rounded-sm bg-accent align-middle" />
                     )}
                   </div>
                 ) : (
                   <p className="mt-3 text-sm leading-6 text-ink-muted">
-                    {liveStageId === selectedStage.id && isActive
+                    {selectedStageTone === "live"
                       ? "Waiting for streamed output from this stage."
-                      : "No transcript was captured for this stage."}
+                      : selectedStageTone === "paused"
+                        ? "This checkpoint paused before a transcript snapshot was fully captured."
+                        : "No transcript was captured for this stage."}
                   </p>
                 )}
               </div>
@@ -225,7 +267,7 @@ export function AgentReasoning({ status, currentStageId, stageHistory }: Props) 
                   )}
                   {!selectedStage.snapshot && (
                     <p className="text-sm leading-6 text-ink-muted">
-                      Structured output will appear here when the stage completes.
+                      Structured output appears here when the stage finishes or is checkpointed.
                     </p>
                   )}
                 </div>
@@ -295,7 +337,7 @@ export function AgentReasoning({ status, currentStageId, stageHistory }: Props) 
           <div className="flex h-full items-center justify-center rounded-[1.4rem] border border-dashed border-line-strong bg-surface-muted px-6 text-center">
             {status === "idle" && (
               <p className="max-w-sm text-sm leading-6 text-ink-muted">
-                Select a trade from the triage board to open its reasoning workstation.
+                Select a case from the board to open its reasoning workstation.
               </p>
             )}
             {status === "starting" && (
@@ -311,7 +353,7 @@ export function AgentReasoning({ status, currentStageId, stageHistory }: Props) 
                 </p>
               </div>
             )}
-            {(status === "complete" || status === "escalated") && (
+            {isTerminal && (
               <p className="text-sm font-medium text-[var(--success-ink)]">Review complete.</p>
             )}
             {status === "error" && (
@@ -355,6 +397,44 @@ function SnapshotCallout({
       <p className="mt-1 text-sm leading-6">{value}</p>
     </div>
   )
+}
+
+function getStageTone(
+  stage: ThreadStageRecord | null,
+  context: {
+    liveStageId: string | null
+    pausedStageId: string | null
+    isActive: boolean
+    isPaused: boolean
+    isTerminal: boolean
+    isError: boolean
+    latestStageId: string | null
+  },
+): StageTone {
+  if (!stage) return "neutral"
+  if (context.isActive && stage.id === context.liveStageId) return "live"
+  if (context.isPaused && stage.id === context.pausedStageId) return "paused"
+  if (stage.status === "error" || (context.isError && stage.id === context.latestStageId)) return "error"
+  if (stage.status === "complete" || (context.isTerminal && stage.id === context.latestStageId)) {
+    return "complete"
+  }
+  return "neutral"
+}
+
+function getStageToneClass(tone: StageTone) {
+  if (tone === "live") return "bg-accent-soft text-accent"
+  if (tone === "paused") return "bg-[var(--warning-soft)] text-[var(--warning-ink)]"
+  if (tone === "complete") return "bg-[var(--success-soft)] text-[var(--success-ink)]"
+  if (tone === "error") return "bg-[var(--critical-soft)] text-[var(--critical-ink)]"
+  return "bg-surface-muted text-ink-muted"
+}
+
+function getStageToneLabel(tone: StageTone, escalatedStage = false) {
+  if (tone === "live") return "live"
+  if (tone === "paused") return "paused"
+  if (tone === "complete") return escalatedStage ? "escalated" : "complete"
+  if (tone === "error") return "error"
+  return "captured"
 }
 
 function formatStageTime(isoDate: string) {

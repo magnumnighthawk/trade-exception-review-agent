@@ -69,6 +69,8 @@ const SECTION_CONFIG: Array<{
 interface Props {
   items: QueueItem[]
   isLoading: boolean
+  queueError: string | null
+  lastQueueSyncAt: string | null
   selectedTradeId: string | null
   selectedThreadId: string | null
   onSelectItem: (item: QueueItem) => void
@@ -79,6 +81,8 @@ interface Props {
 export function ExceptionQueue({
   items,
   isLoading,
+  queueError,
+  lastQueueSyncAt,
   selectedTradeId,
   selectedThreadId,
   onSelectItem,
@@ -107,15 +111,8 @@ export function ExceptionQueue({
     items: sortItems(items.filter((item) => section.statuses.includes(item.status))),
   }))
 
-  const selectedClosedItem = groupedSections
-    .find((section) => section.id === "closed")
-    ?.items.some(
-      (item) =>
-        item.trade_id === selectedTradeId ||
-        (item.thread_id != null && item.thread_id === selectedThreadId),
-    ) ?? false
-
   const queueCounts = {
+    total: items.length,
     urgent: groupedSections.find((section) => section.id === "waiting_human")?.items.length ?? 0,
     live:
       groupedSections.find((section) => section.id === "running")?.items.length ??
@@ -123,33 +120,57 @@ export function ExceptionQueue({
     ready: groupedSections.find((section) => section.id === "idle")?.items.length ?? 0,
     closed: groupedSections.find((section) => section.id === "closed")?.items.length ?? 0,
   }
+  const boardStatusLabel = queueError ? "Sync issue" : lastQueueSyncAt ? "Board live" : "Connecting"
+  const boardStatusTone = queueError
+    ? "border-[var(--critical-border)] bg-[var(--critical-soft)] text-[var(--critical-ink)]"
+    : lastQueueSyncAt
+      ? "border-line-strong bg-surface text-ink-muted"
+      : "border-accent/30 bg-accent-soft text-accent"
+  const boardStatusDot = queueError
+    ? "bg-[var(--critical-ink)]"
+    : lastQueueSyncAt
+      ? isLoading
+        ? "animate-pulse bg-[var(--success-solid)]"
+        : "bg-[var(--success-solid)]"
+      : "animate-pulse bg-accent"
+  const boardStatusTitle = queueError
+    ? queueError
+    : lastQueueSyncAt
+      ? `Last successful sync ${new Date(lastQueueSyncAt).toLocaleTimeString()}`
+      : "Waiting for first successful queue sync"
 
   return (
     <section className="panel flex h-full min-h-[24rem] flex-col overflow-hidden rounded-[1.75rem]">
       <header className="panel-header border-b border-line px-5 py-4">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h2 className="text-sm font-semibold text-ink-strong">Exception board</h2>
-            <p className="mt-1 text-xs text-ink-muted">
-              Structured by operator task so urgent work reads at a glance.
-            </p>
+        <div className="flex flex-col gap-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-sm font-semibold text-ink-strong">Exception board</h2>
+                <span className="rounded-full border border-line-strong bg-surface px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-ink-muted">
+                  {queueCounts.total} exceptions
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-ink-muted">
+                Prioritized by operator action so review work stays in front.
+              </p>
+            </div>
+
+            <div
+              className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs ${boardStatusTone}`}
+              title={boardStatusTitle}
+            >
+              <span className={`status-dot h-2 w-2 rounded-full ${boardStatusDot}`} />
+              <span>{boardStatusLabel}</span>
+            </div>
           </div>
 
-          <div className="flex items-center gap-2 rounded-full border border-line-strong bg-surface px-3 py-1.5 text-xs text-ink-muted">
-            <span
-              className={`status-dot h-2 w-2 rounded-full ${
-                isLoading ? "animate-pulse bg-accent" : "bg-[var(--success-solid)]"
-              }`}
-            />
-            <span>{isLoading ? "Updating" : "Live"}</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <QueueCountPill label="Awaiting review" value={queueCounts.urgent} tone="warning" />
+            <QueueCountPill label="In progress" value={queueCounts.live} tone="accent" />
+            <QueueCountPill label="Ready" value={queueCounts.ready} tone="neutral" />
+            <QueueCountPill label="Closed" value={queueCounts.closed} tone="success" />
           </div>
-        </div>
-
-        <div className="mt-4 grid grid-cols-2 gap-2">
-          <QueueStat label="Urgent" value={queueCounts.urgent} tone="warning" />
-          <QueueStat label="Live" value={queueCounts.live} tone="accent" />
-          <QueueStat label="Ready" value={queueCounts.ready} tone="neutral" />
-          <QueueStat label="Closed" value={queueCounts.closed} tone="success" />
         </div>
       </header>
 
@@ -157,8 +178,7 @@ export function ExceptionQueue({
         <div className="space-y-4">
           {groupedSections.map((section) => {
             const isClosedSection = section.id === "closed"
-            const shouldShowSection =
-              section.items.length > 0 && (!isClosedSection || showClosed || selectedClosedItem)
+            const shouldShowSection = section.items.length > 0 && !isClosedSection
 
             if (isClosedSection && section.items.length > 0) {
               return (
@@ -176,11 +196,11 @@ export function ExceptionQueue({
                       <span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${section.accent}`}>
                         {section.items.length}
                       </span>
-                      <span className="text-xs text-ink-soft">{showClosed || selectedClosedItem ? "Hide" : "Show"}</span>
+                      <span className="text-xs text-ink-soft">{showClosed ? "Hide" : "Show"}</span>
                     </div>
                   </button>
 
-                  {(showClosed || selectedClosedItem) && (
+                  {showClosed && (
                     <div className="space-y-2.5">
                       {section.items.map((item) => (
                         <QueueCard
@@ -239,7 +259,7 @@ export function ExceptionQueue({
   )
 }
 
-function QueueStat({
+function QueueCountPill({
   label,
   value,
   tone,
@@ -258,9 +278,9 @@ function QueueStat({
           : "border-line-strong bg-surface text-ink-muted"
 
   return (
-    <div className={`rounded-[1.1rem] border px-3 py-3 ${toneClass}`}>
-      <p className="text-[10px] uppercase tracking-[0.18em]">{label}</p>
-      <p className="mt-1 text-lg font-semibold">{value}</p>
+    <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 ${toneClass}`}>
+      <span className="text-[10px] font-semibold uppercase tracking-[0.18em]">{label}</span>
+      <span className="text-xs font-semibold">{value}</span>
     </div>
   )
 }

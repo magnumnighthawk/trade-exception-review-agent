@@ -71,10 +71,14 @@ const toStageRecord = (stage: ThreadStageResponse): ThreadStageRecord => ({
 const getLatestStageId = (stageHistory: ThreadStageRecord[]): string | null =>
   stageHistory.length > 0 ? stageHistory[stageHistory.length - 1].id : null
 
+const getLatestRunningStageId = (stageHistory: ThreadStageRecord[]): string | null =>
+  [...stageHistory].reverse().find((stage) => stage.status === "running")?.id ?? null
+
 export interface UseSupervisionThreadsReturn {
   queueItems: QueueItem[]
   isQueueLoading: boolean
   queueError: string | null
+  lastQueueSyncAt: string | null
   selectedThreadId: string | null
   selectedTradeId: string | null
   selectedQueueItem: QueueItem | null
@@ -90,6 +94,7 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
   const [queueItems, setQueueItems] = useState<QueueItem[]>([])
   const [isQueueLoading, setIsQueueLoading] = useState(false)
   const [queueError, setQueueError] = useState<string | null>(null)
+  const [lastQueueSyncAt, setLastQueueSyncAt] = useState<string | null>(null)
 
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null)
   const [selectedTradeId, setSelectedTradeId] = useState<string | null>(null)
@@ -145,6 +150,9 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
 
       const payload = (await response.json()) as ThreadDetailResponse
       const stageHistory = payload.stage_history.map(toStageRecord)
+      const liveStageId = payload.current_node
+        ? getLatestRunningStageId(stageHistory) ?? getLatestStageId(stageHistory)
+        : null
 
       upsertSession(threadId, (session) => ({
         ...(session ?? defaultSession(threadId)),
@@ -152,7 +160,7 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
         tradeId: payload.trade_id,
         status: toAgentStatus(payload.status),
         currentNode: payload.current_node,
-        currentStageId: payload.current_node ? getLatestStageId(stageHistory) : session?.currentStageId ?? getLatestStageId(stageHistory),
+        currentStageId: liveStageId,
         stageHistory,
         interruptPayload: payload.interrupt_payload,
         finalState: payload.final_state,
@@ -223,6 +231,7 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
             return {
               ...base,
               currentNode: null,
+              currentStageId: null,
               stageHistory: base.stageHistory.map((stage) =>
                 stage.id === targetStageId
                   ? {
@@ -246,6 +255,7 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
               ...base,
               status: "waiting_human",
               currentNode: null,
+              currentStageId: null,
               interruptPayload: event.interrupt_payload,
             }
           })
@@ -255,11 +265,20 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
         case "complete":
           upsertSession(threadId, (session) => {
             const base = session ?? defaultSession(threadId)
+            const targetStageId =
+              base.currentStageId ?? getLatestRunningStageId(base.stageHistory)
+
             return {
               ...base,
               status: event.status === "escalated" ? "escalated" : "complete",
               currentNode: null,
+              currentStageId: null,
               finalState: event.final_state,
+              stageHistory: base.stageHistory.map((stage) =>
+                stage.id === targetStageId && stage.status === "running"
+                  ? { ...stage, status: "complete", completedAt: nowIso() }
+                  : stage,
+              ),
             }
           })
           closeStream(threadId)
@@ -274,6 +293,7 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
               ...base,
               status: "error",
               currentNode: null,
+              currentStageId: null,
               error: event.message,
               stageHistory: base.stageHistory.map((stage) =>
                 stage.id === targetStageId && stage.status === "running"
@@ -325,6 +345,7 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
             status: "error",
             error: "Stream disconnected",
             currentNode: null,
+            currentStageId: null,
             stageHistory: base.stageHistory.map((stage) =>
               stage.id === targetStageId && stage.status === "running"
                 ? { ...stage, status: "error", completedAt: nowIso() }
@@ -348,15 +369,24 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
       const payload = (await response.json()) as QueueResponse
       setQueueItems(payload.items)
       setQueueError(null)
+      setLastQueueSyncAt(nowIso())
 
       // Sync queue-level status into local sessions without overwriting rich stream context.
       setSessions((prev) => {
         const next = { ...prev }
         for (const item of payload.items) {
           if (!item.thread_id || !next[item.thread_id]) continue
+          const nextStatus = toAgentStatus(item.status)
           next[item.thread_id] = {
             ...next[item.thread_id],
-            status: toAgentStatus(item.status),
+            status: nextStatus,
+            currentStageId:
+              nextStatus === "starting" ||
+              nextStatus === "running" ||
+              nextStatus === "streaming" ||
+              nextStatus === "resuming"
+                ? next[item.thread_id].currentStageId
+                : null,
             interruptPayload: item.interrupt_payload ?? next[item.thread_id].interruptPayload,
           }
         }
@@ -450,7 +480,7 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
 
       upsertSession(threadId, (session) => {
         const base = session ?? defaultSession(threadId)
-        return { ...base, status: "resuming", currentNode: null, error: null }
+        return { ...base, status: "resuming", currentNode: null, currentStageId: null, error: null }
       })
 
       const response = await fetch(`${API_BASE}/review/${threadId}/decision`, {
@@ -462,7 +492,12 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
       if (!response.ok) {
         upsertSession(threadId, (session) => {
           const base = session ?? defaultSession(threadId)
-          return { ...base, status: "error", error: `Decision failed (${response.status})` }
+          return {
+            ...base,
+            status: "error",
+            currentStageId: null,
+            error: `Decision failed (${response.status})`,
+          }
         })
         return
       }
@@ -473,7 +508,7 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
       if (nextStatus === "complete" || nextStatus === "escalated") {
         upsertSession(threadId, (session) => {
           const base = session ?? defaultSession(threadId)
-          return { ...base, status: toAgentStatus(nextStatus) }
+          return { ...base, status: toAgentStatus(nextStatus), currentStageId: null }
         })
         await refreshQueue()
         await hydrateThreadDetail(threadId)
@@ -519,6 +554,7 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
     queueItems,
     isQueueLoading,
     queueError,
+    lastQueueSyncAt,
     selectedThreadId,
     selectedTradeId,
     selectedQueueItem,

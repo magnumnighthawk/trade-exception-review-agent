@@ -51,11 +51,15 @@ function ThemeIcon({
   )
 }
 
-export function ThemeSwitcher() {
+export function ThemeSwitcher({ compact = false }: { compact?: boolean }) {
   const { theme, resolvedTheme, setTheme } = useTheme()
 
   return (
-    <div className="panel-elevated inline-flex items-center gap-1 rounded-full p-1.5">
+    <div
+      className={`panel-elevated inline-flex items-center gap-1 rounded-full ${
+        compact ? "p-1" : "p-1.5"
+      }`}
+    >
       {THEME_OPTIONS.map((option) => {
         const isActive = theme === option.value
         const description =
@@ -68,16 +72,17 @@ export function ThemeSwitcher() {
             key={option.value}
             type="button"
             onClick={() => setTheme(option.value)}
-            className={`group flex items-center gap-2 rounded-full px-3 py-2 text-xs font-medium ${
+            className={`group flex items-center rounded-full text-xs font-medium ${
               isActive
                 ? "bg-accent text-accent-contrast shadow-[0_12px_30px_-18px_var(--accent)]"
                 : "text-ink-muted hover:bg-surface-hover hover:text-ink-strong"
-            }`}
+            } ${compact ? "h-9 w-9 justify-center px-0 py-0" : "gap-2 px-3 py-2"}`}
+            aria-label={`Switch to ${option.label} theme`}
             aria-pressed={isActive}
             title={description}
           >
             <ThemeIcon option={option.value} active={isActive} />
-            <span>{option.label}</span>
+            {!compact && <span>{option.label}</span>}
           </button>
         )
       })}
