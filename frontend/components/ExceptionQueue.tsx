@@ -1,36 +1,23 @@
 "use client"
 
 import type { QueueItem } from "@/lib/types"
-
-const RISK_COLOURS: Record<string, string> = {
-  critical: "text-red-500 bg-red-500/20 border border-red-500/40",
-  high: "text-orange-400 bg-orange-400/20 border border-orange-400/40",
-  medium: "text-yellow-400 bg-yellow-400/20 border border-yellow-400/40",
-  low: "text-green-400 bg-green-400/20 border border-green-400/40",
-}
-
-const STATUS_COLOURS: Record<string, string> = {
-  idle: "text-zinc-500",
-  starting: "text-blue-400 animate-pulse",
-  running: "text-blue-400 animate-pulse",
-  streaming: "text-blue-400 animate-pulse",
-  waiting_human: "text-yellow-400 font-medium",
-  resuming: "text-blue-400 animate-pulse",
-  complete: "text-green-400",
-  escalated: "text-orange-400",
-  error: "text-red-400",
-}
+import {
+  RISK_BADGE_CLASSES,
+  STATUS_PILL_CLASSES,
+  getConfidenceBarClass,
+  resolveConfidenceRiskLevel,
+} from "@/lib/theme"
 
 const STATUS_LABELS: Record<string, string> = {
-  idle: "Awaiting Run",
-  starting: "Starting…",
-  running: "Investigating…",
-  streaming: "Investigating…",
-  waiting_human: "⚡ Awaiting Review",
-  resuming: "Resuming…",
-  complete: "✓ Resolved",
-  escalated: "↑ Escalated",
-  error: "✗ Error",
+  idle: "Awaiting run",
+  starting: "Starting",
+  running: "Investigating",
+  streaming: "Investigating",
+  waiting_human: "Awaiting review",
+  resuming: "Resuming",
+  complete: "Resolved",
+  escalated: "Escalated",
+  error: "Error",
 }
 
 interface Props {
@@ -66,128 +53,146 @@ export function ExceptionQueue({
     return ageA - ageB
   })
 
-  const confidenceToRiskLevel = (confidence?: number | null): string => {
-    if (confidence == null) return "medium"
-    if (confidence > 0.85) return "low"
-    if (confidence > 0.70) return "medium"
-    return "high"
-  }
-
   const formatPausedAt = (isoDate?: string | null): string => {
-    if (!isoDate) return ""
-    return new Date(isoDate).toLocaleString()
+    if (!isoDate) return "Not started"
+    return `Paused ${new Date(isoDate).toLocaleString()}`
   }
 
   return (
-    <div className="flex flex-col h-full bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
-      <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
-        <div>
-          <h2 className="text-sm font-semibold text-zinc-100">Exception Queue</h2>
-          <p className="text-xs text-zinc-500 mt-0.5">
-            {items.filter((item) => item.status === "waiting_human").length} awaiting review
-          </p>
-        </div>
-        <div className="flex items-center gap-1.5 text-xs">
-          {isLoading ? (
-            <>
-              <span className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
-              <span className="text-zinc-400">Updating…</span>
-            </>
-          ) : (
-            <>
-              <span className="h-1.5 w-1.5 rounded-full bg-green-400" />
-              <span className="text-zinc-500">Live</span>
-            </>
-          )}
-        </div>
-      </div>
+    <section className="panel flex h-full min-h-[24rem] flex-col overflow-hidden rounded-[1.6rem]">
+      <header className="panel-header border-b border-line px-5 py-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-ink-strong">Exception queue</h2>
+            <p className="mt-1 text-xs text-ink-muted">
+              {items.filter((item) => item.status === "waiting_human").length} awaiting review
+            </p>
+          </div>
 
-      <div className="flex-1 overflow-y-auto divide-y divide-zinc-800/50">
-        {sortedItems.map((item) => {
-          const isSelectedByTrade = item.trade_id === selectedTradeId
-          const isSelectedByThread = item.thread_id != null && item.thread_id === selectedThreadId
-          const isSelected = isSelectedByTrade || isSelectedByThread
-
-          const confidencePercent = item.confidence == null ? null : Math.round(item.confidence * 100)
-          const riskLevel = item.risk_level || confidenceToRiskLevel(item.confidence)
-          const canRun = item.status === "idle"
-          const canReset = Boolean(item.thread_id)
-
-          return (
-            <div
-              key={`${item.trade_id}-${item.thread_id ?? "pending"}`}
-              className={`px-4 py-3.5 transition-all hover:bg-zinc-800/50 ${
-                isSelected ? "bg-zinc-800 border-l-2 border-blue-500" : "border-l-2 border-transparent"
+          <div className="flex items-center gap-2 rounded-full border border-line-strong bg-surface px-3 py-1.5 text-xs text-ink-muted">
+            <span
+              className={`status-dot h-2 w-2 rounded-full ${
+                isLoading ? "animate-pulse bg-accent" : "bg-[var(--success-solid)]"
               }`}
-            >
-              <button onClick={() => onSelectItem(item)} className="w-full text-left">
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-xs font-mono font-medium text-zinc-100">{item.trade_id}</span>
-                    <span className={`text-xs px-2 py-0.5 rounded font-medium ${RISK_COLOURS[riskLevel] || RISK_COLOURS.medium}`}>
-                      {riskLevel.toUpperCase()}
+            />
+            <span>{isLoading ? "Updating" : "Live"}</span>
+          </div>
+        </div>
+      </header>
+
+      <div className="flex-1 overflow-y-auto px-3 py-3">
+        <div className="space-y-2.5">
+          {sortedItems.map((item) => {
+            const isSelectedByTrade = item.trade_id === selectedTradeId
+            const isSelectedByThread = item.thread_id != null && item.thread_id === selectedThreadId
+            const isSelected = isSelectedByTrade || isSelectedByThread
+
+            const confidencePercent = item.confidence == null ? null : Math.round(item.confidence * 100)
+            const riskLevel = item.risk_level || resolveConfidenceRiskLevel(item.confidence)
+            const canRun = item.status === "idle"
+            const canReset = Boolean(item.thread_id)
+
+            return (
+              <article
+                key={`${item.trade_id}-${item.thread_id ?? "pending"}`}
+                className={`rounded-[1.35rem] border p-4 transition duration-200 ${
+                  isSelected
+                    ? "border-accent bg-surface-selected shadow-[0_24px_44px_-34px_var(--accent)]"
+                    : "border-transparent bg-transparent hover:border-line-strong hover:bg-surface-hover"
+                }`}
+              >
+                <button type="button" onClick={() => onSelectItem(item)} className="w-full text-left">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-xs font-semibold uppercase tracking-[0.16em] text-ink-strong">
+                          {item.trade_id}
+                        </span>
+                        <span
+                          className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+                            RISK_BADGE_CLASSES[riskLevel] || RISK_BADGE_CLASSES.medium
+                          }`}
+                        >
+                          {riskLevel}
+                        </span>
+                      </div>
+                      <p className="mt-2 truncate text-sm text-ink-muted">
+                        {item.counterparty || "Unknown counterparty"}
+                      </p>
+                    </div>
+
+                    <span
+                      className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+                        STATUS_PILL_CLASSES[item.status] || STATUS_PILL_CLASSES.idle
+                      }`}
+                    >
+                      {STATUS_LABELS[item.status] || item.status}
                     </span>
                   </div>
-                  <span className={`text-xs px-2 py-0.5 rounded ${STATUS_COLOURS[item.status] || STATUS_COLOURS.idle}`}>
-                    {STATUS_LABELS[item.status] || item.status}
-                  </span>
-                </div>
 
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <p className="text-xs text-zinc-400 truncate">{item.counterparty || "Unknown"}</p>
-                  <p className="text-xs font-mono text-zinc-300 shrink-0">
-                    ${(item.amount ? item.amount / 1_000_000 : 0).toFixed(2)}M
-                  </p>
-                </div>
+                  <div className="mt-4 flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-[11px] uppercase tracking-[0.18em] text-ink-soft">Amount</p>
+                      <p className="mt-1 font-mono text-sm text-ink-strong">
+                        ${(item.amount ? item.amount / 1_000_000 : 0).toFixed(2)}M
+                      </p>
+                    </div>
 
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                    {confidencePercent != null && (
-                      <div
-                        className={`h-full ${
-                          confidencePercent > 85 ? "bg-green-500" : confidencePercent > 70 ? "bg-yellow-500" : "bg-red-500"
-                        }`}
-                        style={{ width: `${confidencePercent}%` }}
-                      />
-                    )}
+                    <div className="min-w-[7rem] flex-1">
+                      <div className="mb-1 flex items-center justify-between gap-2 text-[11px] uppercase tracking-[0.18em] text-ink-soft">
+                        <span>Confidence</span>
+                        <span className="text-ink-muted">
+                          {confidencePercent == null ? "--" : `${confidencePercent}%`}
+                        </span>
+                      </div>
+                      <div className="h-2 rounded-full bg-surface-muted">
+                        {confidencePercent != null && (
+                          <div
+                            className={`h-2 rounded-full ${getConfidenceBarClass(confidencePercent)}`}
+                            style={{ width: `${confidencePercent}%` }}
+                          />
+                        )}
+                      </div>
+                    </div>
                   </div>
-                  <span className="text-xs text-zinc-400 shrink-0 w-10 text-right">
-                    {confidencePercent == null ? "--" : `${confidencePercent}%`}
-                  </span>
+
+                  {item.proposal_action && (
+                    <p className="mt-4 rounded-[1rem] border border-line bg-surface px-3 py-2 text-xs italic leading-5 text-ink-muted">
+                      {item.proposal_action}
+                    </p>
+                  )}
+
+                  <p className="mt-3 text-xs text-ink-soft">{formatPausedAt(item.paused_at)}</p>
+                </button>
+
+                <div className="mt-4 flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={!canRun}
+                    onClick={() => void onRunTrade(item.trade_id)}
+                    className="rounded-full bg-accent px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-accent-contrast shadow-[0_22px_36px_-30px_var(--accent)] hover:-translate-y-0.5 hover:bg-accent-strong disabled:translate-y-0 disabled:opacity-35"
+                  >
+                    Run review
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={!canReset || !item.thread_id}
+                    onClick={() => {
+                      if (item.thread_id) {
+                        void onResetThread(item.thread_id)
+                      }
+                    }}
+                    className="rounded-full border border-line-strong bg-surface px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-muted hover:bg-surface-hover hover:text-ink-strong disabled:opacity-35"
+                  >
+                    Reset
+                  </button>
                 </div>
-
-                {item.proposal_action && (
-                  <p className="text-xs text-zinc-500 truncate mb-1 italic">{item.proposal_action}</p>
-                )}
-                <p className="text-xs text-zinc-600">
-                  {item.paused_at ? `Paused at ${formatPausedAt(item.paused_at)}` : "Not started"}
-                </p>
-              </button>
-
-              <div className="mt-3 flex items-center gap-2">
-                <button
-                  disabled={!canRun}
-                  onClick={() => void onRunTrade(item.trade_id)}
-                  className="px-2 py-1 text-[11px] rounded border border-blue-500/40 text-blue-300 disabled:opacity-30 disabled:cursor-not-allowed hover:bg-blue-500/10"
-                >
-                  ▶ Run
-                </button>
-                <button
-                  disabled={!canReset || !item.thread_id}
-                  onClick={() => {
-                    if (item.thread_id) {
-                      void onResetThread(item.thread_id)
-                    }
-                  }}
-                  className="px-2 py-1 text-[11px] rounded border border-zinc-600 text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed hover:bg-zinc-700/50"
-                >
-                  ↺ Reset
-                </button>
-              </div>
-            </div>
-          )
-        })}
+              </article>
+            )
+          })}
+        </div>
       </div>
-    </div>
+    </section>
   )
 }

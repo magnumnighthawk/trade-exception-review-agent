@@ -25,10 +25,10 @@
 import type { AgentStatus } from "@/lib/types"
 
 const NODES = [
-  { id: "receive_exception",  label: "Receive",   icon: "📥" },
-  { id: "investigate",        label: "Investigate", icon: "🔍" },
-  { id: "propose_resolution", label: "Propose",   icon: "💡" },
-  { id: "execute_resolution", label: "Execute",   icon: "⚙️" },
+  { id: "receive_exception", label: "Receive", icon: "◌" },
+  { id: "investigate", label: "Investigate", icon: "◎" },
+  { id: "propose_resolution", label: "Propose", icon: "✦" },
+  { id: "execute_resolution", label: "Execute", icon: "◈" },
 ]
 
 interface Props {
@@ -43,79 +43,100 @@ export function AgentReasoning({ status, tokens, currentNode, nodeHistory }: Pro
   const isPaused = status === "waiting_human"
 
   return (
-    <div className={`flex flex-col h-full bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden transition-opacity ${isPaused ? "opacity-60" : "opacity-100"}`}>
-      {/* Header */}
-      <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
-        <div>
-          <h2 className="text-sm font-semibold text-zinc-100">Agent Reasoning</h2>
-          <p className="text-xs text-zinc-500 mt-0.5">
-            {isPaused ? "Paused — awaiting your decision" : isActive ? "Thinking…" : "Idle"}
-          </p>
+    <section
+      className={`panel flex h-full min-h-[24rem] flex-col overflow-hidden rounded-[1.75rem] transition-opacity ${
+        isPaused ? "opacity-70" : "opacity-100"
+      }`}
+    >
+      <header className="panel-header border-b border-line px-5 py-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-ink-strong">Agent reasoning</h2>
+            <p className="mt-1 text-xs text-ink-muted">
+              {isPaused ? "Checkpointed and waiting for operator input" : isActive ? "Streaming live reasoning" : "Ready"}
+            </p>
+          </div>
+
+          {isActive && (
+            <span className="flex items-center gap-2 rounded-full border border-accent/25 bg-accent-soft px-3 py-1.5 text-xs font-medium text-accent">
+              <span className="status-dot h-2 w-2 animate-pulse rounded-full bg-accent" />
+              Live
+            </span>
+          )}
         </div>
-        {isActive && (
-          <span className="flex items-center gap-1.5 text-xs text-blue-400">
-            <span className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-ping" />
-            Live
-          </span>
-        )}
-      </div>
+      </header>
 
-      {/* Node pipeline */}
-      <div className="px-4 py-3 border-b border-zinc-800/60 flex items-center gap-0">
-        {NODES.map((node, i) => {
-          const done    = nodeHistory.includes(node.id) && node.id !== currentNode
-          const active  = node.id === currentNode
-          const pending = !done && !active
+      <div className="border-b border-line px-5 py-4">
+        <div className="flex flex-wrap items-center gap-2">
+          {NODES.map((node, index) => {
+            const done = nodeHistory.includes(node.id) && node.id !== currentNode
+            const active = node.id === currentNode
 
-          return (
-            <div key={node.id} className="flex items-center">
-              <div className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs transition-all ${
-                active  ? "bg-blue-500/20 text-blue-300 border border-blue-500/30" :
-                done    ? "text-green-400" :
-                          "text-zinc-600"
-              }`}>
-                <span>{node.icon}</span>
-                <span className="font-medium">{node.label}</span>
-                {active && <span className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />}
-                {done   && <span className="text-green-400">✓</span>}
+            return (
+              <div key={node.id} className="flex items-center gap-2">
+                <div
+                  className={`flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-medium ${
+                    active
+                      ? "border-accent bg-accent-soft text-accent"
+                      : done
+                        ? "border-[var(--success-border)] bg-[var(--success-soft)] text-[var(--success-ink)]"
+                        : "border-line-strong bg-surface text-ink-soft"
+                  }`}
+                >
+                  <span className="text-sm leading-none">{node.icon}</span>
+                  <span>{node.label}</span>
+                  {active && <span className="status-dot h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />}
+                  {done && <span className="text-[var(--success-ink)]">✓</span>}
+                </div>
+
+                {index < NODES.length - 1 && (
+                  <span className="text-xs text-ink-soft/80" aria-hidden="true">
+                    →
+                  </span>
+                )}
               </div>
-              {i < NODES.length - 1 && (
-                <span className={`mx-1 text-xs ${done ? "text-green-400/40" : "text-zinc-700"}`}>→</span>
-              )}
-            </div>
-          )
-        })}
+            )
+          })}
+        </div>
       </div>
 
-      {/* Streaming text area */}
-      <div className="flex-1 overflow-y-auto p-4">
+      <div className="flex-1 overflow-y-auto px-5 py-4">
         {tokens ? (
-          <div className="font-mono text-xs text-zinc-300 whitespace-pre-wrap leading-relaxed">
+          <div className="rounded-[1.4rem] border border-line bg-surface-elevated p-4 font-mono text-[13px] leading-6 text-ink whitespace-pre-wrap">
             {tokens}
-            {isActive && (
-              <span className="inline-block w-2 h-3 bg-blue-400 animate-pulse ml-0.5 align-middle" />
-            )}
+            {isActive && <span className="ml-1 inline-block h-4 w-2 animate-pulse rounded-sm bg-accent align-middle" />}
           </div>
         ) : (
-          <div className="h-full flex items-center justify-center">
+          <div className="flex h-full items-center justify-center rounded-[1.4rem] border border-dashed border-line-strong bg-surface-muted px-6 text-center">
             {status === "idle" && (
-              <p className="text-xs text-zinc-600">Select an exception to start a review.</p>
+              <p className="max-w-sm text-sm leading-6 text-ink-muted">
+                Select an exception from the queue to watch the agent inspect evidence in real time.
+              </p>
             )}
-            {(status === "starting") && (
-              <p className="text-xs text-zinc-500 animate-pulse">Connecting to agent…</p>
+            {status === "starting" && (
+              <p className="text-sm text-ink-muted">
+                Connecting to the review stream<span className="animate-pulse">…</span>
+              </p>
             )}
             {isPaused && (
-              <div className="text-center">
-                <p className="text-sm text-yellow-400 font-medium">⚡ Agent is waiting</p>
-                <p className="text-xs text-zinc-500 mt-1">Review the proposal below and submit your decision.</p>
+              <div>
+                <p className="text-base font-semibold text-[var(--warning-ink)]">Operator decision required</p>
+                <p className="mt-2 text-sm leading-6 text-ink-muted">
+                  The agent has checkpointed after proposing a resolution. Review the decision surface to continue.
+                </p>
               </div>
             )}
             {(status === "complete" || status === "escalated") && (
-              <p className="text-xs text-green-400">✓ Review complete.</p>
+              <p className="text-sm font-medium text-[var(--success-ink)]">Review complete.</p>
+            )}
+            {status === "error" && (
+              <p className="text-sm font-medium text-[var(--critical-ink)]">
+                The session hit an error. Reset the thread or choose another review.
+              </p>
             )}
           </div>
         )}
       </div>
-    </div>
+    </section>
   )
 }

@@ -1,33 +1,50 @@
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
-import "./globals.css";
+import Script from "next/script"
+import type { Metadata } from "next"
+import { Fraunces, IBM_Plex_Mono, Manrope } from "next/font/google"
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
+import { ThemeProvider } from "@/components/ThemeProvider"
+import { getThemeScript } from "@/lib/theme"
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+import "./globals.css"
+
+const manrope = Manrope({
+  variable: "--font-body",
   subsets: ["latin"],
-});
+})
+
+const fraunces = Fraunces({
+  variable: "--font-display",
+  subsets: ["latin"],
+})
+
+const ibmPlexMono = IBM_Plex_Mono({
+  variable: "--font-mono-body",
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+})
 
 export const metadata: Metadata = {
   title: "Trade Exception Review Agent",
   description: "HITL supervision cockpit for trade exception review",
-};
+}
 
 export default function RootLayout({
   children,
 }: Readonly<{
-  children: React.ReactNode;
+  children: React.ReactNode
 }>) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      suppressHydrationWarning
+      className={`${manrope.variable} ${fraunces.variable} ${ibmPlexMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full font-sans">
+        <Script id="theme-bootstrap" strategy="beforeInteractive">
+          {getThemeScript()}
+        </Script>
+        <ThemeProvider>{children}</ThemeProvider>
+      </body>
     </html>
-  );
+  )
 }

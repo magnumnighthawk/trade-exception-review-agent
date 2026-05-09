@@ -1,65 +1,93 @@
-import Image from "next/image";
+import Link from "next/link"
+
+import { ThemeSwitcher } from "@/components/ThemeSwitcher"
+
+const HIGHLIGHTS = [
+  {
+    title: "Confidence-gated review",
+    description: "Operators step in only when the agent falls below policy thresholds or needs a steering decision.",
+  },
+  {
+    title: "Checkpointed execution",
+    description: "Each interrupted thread can pause, resume, or escalate without losing its investigation history.",
+  },
+  {
+    title: "Streaming supervision",
+    description: "Reasoning, queue state, and resolution proposals all stay visible while the agent works live.",
+  },
+]
 
 export default function Home() {
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 py-5 lg:px-6 lg:py-6">
+      <section className="panel-elevated relative overflow-hidden rounded-[2rem] px-6 py-6 sm:px-8 sm:py-8">
+        <div className="absolute inset-x-0 top-0 h-28 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.4),transparent_72%)]" />
+
+        <div className="relative flex flex-col gap-8 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full border border-line-strong bg-surface px-3 py-1 text-[11px] font-medium uppercase tracking-[0.24em] text-ink-soft">
+                Human-in-the-loop ops
+              </span>
+              <span className="rounded-full border border-accent/25 bg-accent-soft px-3 py-1 text-[11px] font-medium text-accent">
+                Modern muted theme system
+              </span>
+            </div>
+
+            <h1 className="mt-6 max-w-3xl font-display text-5xl leading-[0.95] tracking-[-0.04em] text-ink-strong sm:text-6xl">
+              A softer supervision cockpit for high-stakes exception handling.
+            </h1>
+
+            <p className="mt-5 max-w-2xl text-base leading-7 text-ink-muted sm:text-lg">
+              The frontend now uses a shared light and dark palette, persistent theme selection,
+              and a calmer operator surface designed for long review sessions.
+            </p>
+
+            <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+              <Link
+                href="/dashboard"
+                className="inline-flex items-center justify-center rounded-full bg-accent px-5 py-3 text-sm font-semibold text-accent-contrast shadow-[0_24px_44px_-28px_var(--accent)] hover:-translate-y-0.5 hover:bg-accent-strong"
+              >
+                Open dashboard
+              </Link>
+              <div className="inline-flex items-center justify-center rounded-full border border-line-strong bg-surface px-4 py-3 text-sm text-ink-muted">
+                Theme preference is remembered after your first switch.
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-col items-start gap-4 lg:items-end">
+            <ThemeSwitcher />
+            <div className="panel w-full max-w-sm rounded-[1.6rem] p-5">
+              <p className="text-xs uppercase tracking-[0.24em] text-ink-soft">What changed</p>
+              <div className="mt-4 space-y-3">
+                <div className="rounded-[1.1rem] border border-line-strong bg-surface-muted px-4 py-3">
+                  <p className="text-sm font-semibold text-ink-strong">Light mode</p>
+                  <p className="mt-1 text-sm leading-6 text-ink-muted">
+                    Warm stone neutrals, lavender accents, and pastel risk tones.
+                  </p>
+                </div>
+                <div className="rounded-[1.1rem] border border-line-strong bg-surface-muted px-4 py-3">
+                  <p className="text-sm font-semibold text-ink-strong">Dark mode</p>
+                  <p className="mt-1 text-sm leading-6 text-ink-muted">
+                    A related twilight palette with softer contrast and clearer state surfaces.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
-  );
+      </section>
+
+      <section className="mt-4 grid gap-4 lg:grid-cols-3">
+        {HIGHLIGHTS.map((item) => (
+          <article key={item.title} className="panel rounded-[1.6rem] p-5">
+            <p className="text-xs uppercase tracking-[0.22em] text-ink-soft">Capability</p>
+            <h2 className="mt-4 text-xl font-semibold text-ink-strong">{item.title}</h2>
+            <p className="mt-3 text-sm leading-6 text-ink-muted">{item.description}</p>
+          </article>
+        ))}
+      </section>
+    </main>
+  )
 }

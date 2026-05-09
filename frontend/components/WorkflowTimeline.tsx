@@ -14,8 +14,6 @@
 
 "use client"
 
-import { useEffect, useState } from "react"
-
 export interface NodeExecution {
   node_id: string
   status: "pending" | "running" | "complete" | "interrupted" | "error"
@@ -37,15 +35,15 @@ const STATUS_ICONS: Record<string, string> = {
   running: "⟳",
   complete: "✓",
   interrupted: "⚡",
-  error: "✗",
+  error: "✕",
 }
 
-const STATUS_COLOURS: Record<string, string> = {
-  pending: "text-zinc-500 bg-zinc-500/20",
-  running: "text-blue-400 bg-blue-400/20 animate-pulse",
-  complete: "text-green-400 bg-green-400/20",
-  interrupted: "text-yellow-400 bg-yellow-400/20",
-  error: "text-red-400 bg-red-400/20",
+const STATUS_COLOUR_CLASSES: Record<string, string> = {
+  pending: "border-line-strong bg-surface text-ink-soft",
+  running: "border-accent bg-accent-soft text-accent",
+  complete: "border-[var(--success-border)] bg-[var(--success-soft)] text-[var(--success-ink)]",
+  interrupted: "border-[var(--warning-border)] bg-[var(--warning-soft)] text-[var(--warning-ink)]",
+  error: "border-[var(--critical-border)] bg-[var(--critical-soft)] text-[var(--critical-ink)]",
 }
 
 interface Props {
@@ -56,152 +54,136 @@ interface Props {
 }
 
 export function WorkflowTimeline({ nodes, currentNode, isRunning, onInterrupt }: Props) {
-  const [timeline, setTimeline] = useState<NodeExecution[]>([])
-
-  useEffect(() => {
-    setTimeline(nodes)
-  }, [nodes])
-
-  if (timeline.length === 0) {
+  if (nodes.length === 0) {
     return (
-      <div className="flex items-center justify-center h-32 text-zinc-500 text-sm">
-        Waiting for agent to start...
-      </div>
+      <section className="panel flex h-full min-h-[18rem] items-center justify-center rounded-[1.6rem] border border-dashed border-line-strong bg-surface-muted px-6 text-center text-sm text-ink-muted">
+        Waiting for the workflow to start.
+      </section>
     )
   }
 
-  // Calculate total elapsed time
-  const firstStarted = timeline[0]?.started_at
-    ? new Date(timeline[0].started_at).getTime()
-    : Date.now()
-  const lastCompleted = timeline
-    .filter((n) => n.completed_at)
-    .map((n) => new Date(n.completed_at!).getTime())
+  const firstStartedAt = nodes[0]?.started_at ? new Date(nodes[0].started_at).getTime() : null
+  const lastCompletedAt = nodes
+    .filter((node) => node.completed_at)
+    .map((node) => new Date(node.completed_at as string).getTime())
     .sort((a, b) => b - a)[0]
-  const totalElapsedMs = lastCompleted ? lastCompleted - firstStarted : 0
+  const totalElapsedMs = firstStartedAt != null && lastCompletedAt != null ? lastCompletedAt - firstStartedAt : null
 
-  const formatDuration = (ms?: number): string => {
+  const formatDuration = (ms?: number | null): string => {
     if (!ms) return "0ms"
     if (ms < 1000) return `${ms}ms`
     return `${(ms / 1000).toFixed(1)}s`
   }
 
   const formatTime = (isoDate?: string): string => {
-    if (!isoDate) return "-"
-    const offset = new Date(isoDate).getTime() - firstStarted
+    if (!isoDate || firstStartedAt == null) return "—"
+    const offset = new Date(isoDate).getTime() - firstStartedAt
     return `+${formatDuration(Math.max(0, offset))}`
   }
 
   return (
-    <div className="flex flex-col h-full bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
-      {/* Header */}
-      <div className="px-4 py-3 border-b border-zinc-800">
-        <h3 className="text-sm font-semibold text-zinc-100">Workflow Execution</h3>
-        <p className="text-xs text-zinc-500 mt-0.5">
-          Total elapsed: {formatDuration(totalElapsedMs)} {isRunning && "• Still running..."}
+    <section className="panel flex h-full flex-col overflow-hidden rounded-[1.6rem]">
+      <header className="panel-header border-b border-line px-5 py-4">
+        <h3 className="text-sm font-semibold text-ink-strong">Workflow execution</h3>
+        <p className="mt-1 text-xs text-ink-muted">
+          Total elapsed: {formatDuration(totalElapsedMs)} {isRunning ? "· still running" : ""}
         </p>
-      </div>
+      </header>
 
-      {/* Timeline */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
-        {timeline.map((node, idx) => {
+      <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
+        {nodes.map((node, index) => {
           const isCurrent = node.node_id === currentNode
           const displayName = NODE_DISPLAY_NAMES[node.node_id] || node.node_id
 
           return (
-            <div key={idx} className="space-y-1">
-              {/* Node header row */}
-              <div className="flex items-start gap-3">
-                {/* Timeline connector + node circle */}
-                <div className="flex flex-col items-center shrink-0 pt-0.5">
-                  {/* Status circle */}
-                  <div
-                    className={`flex items-center justify-center w-6 h-6 rounded-full border ${STATUS_COLOURS[node.status]}`}
+            <div key={`${node.node_id}-${index}`} className="flex items-start gap-4">
+              <div className="flex shrink-0 flex-col items-center pt-0.5">
+                <div
+                  className={`flex h-8 w-8 items-center justify-center rounded-full border text-xs font-semibold ${STATUS_COLOUR_CLASSES[node.status]}`}
+                >
+                  {STATUS_ICONS[node.status]}
+                </div>
+                {index < nodes.length - 1 && <div className="mt-1 h-8 w-px bg-line-strong" />}
+              </div>
+
+              <div className="min-w-0 flex-1 rounded-[1.15rem] border border-line bg-surface-elevated px-4 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <h4 className="text-sm font-semibold text-ink-strong">{displayName}</h4>
+                  <span className="text-xs text-ink-soft">{formatTime(node.started_at)}</span>
+                </div>
+
+                <div className="mt-2 flex items-center gap-2 text-xs">
+                  <span
+                    className={`font-medium ${
+                      node.status === "running"
+                        ? "text-accent"
+                        : node.status === "complete"
+                          ? "text-[var(--success-ink)]"
+                          : node.status === "interrupted"
+                            ? "text-[var(--warning-ink)]"
+                            : node.status === "error"
+                              ? "text-[var(--critical-ink)]"
+                              : "text-ink-soft"
+                    }`}
                   >
-                    <span className="text-xs font-bold">{STATUS_ICONS[node.status]}</span>
-                  </div>
-
-                  {/* Vertical line to next node (if not last) */}
-                  {idx < timeline.length - 1 && (
-                    <div className={`w-0.5 h-6 my-0.5 ${STATUS_COLOURS[node.status]}`} />
-                  )}
+                    {node.status === "running"
+                      ? "Running"
+                      : node.status.charAt(0).toUpperCase() + node.status.slice(1)}
+                  </span>
+                  {isCurrent && <span className="text-accent">· Current node</span>}
                 </div>
 
-                {/* Node info */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-baseline justify-between gap-2">
-                    <h4 className="text-sm font-medium text-zinc-100">{displayName}</h4>
-                    <span className="text-xs text-zinc-500 shrink-0">{formatTime(node.started_at)}</span>
-                  </div>
-
-                  {/* Duration bar and text */}
-                  {node.duration_ms && (
-                    <div className="mt-1 flex items-center gap-2">
-                      <div className="flex-1 h-1 bg-zinc-800 rounded-full overflow-hidden">
-                        <div
-                          className={`h-full ${
-                            node.status === "error"
-                              ? "bg-red-500"
-                              : node.status === "complete"
-                                ? "bg-green-500"
-                                : "bg-blue-500"
-                          }`}
-                          style={{ width: `${Math.min((node.duration_ms / 5000) * 100, 100)}%` }}
-                        />
-                      </div>
-                      <span className="text-xs text-zinc-400 shrink-0 w-8 text-right">
-                        {formatDuration(node.duration_ms)}
-                      </span>
+                {node.duration_ms != null && (
+                  <div className="mt-3 flex items-center gap-3">
+                    <div className="h-2 flex-1 rounded-full bg-surface-muted">
+                      <div
+                        className={`h-2 rounded-full ${
+                          node.status === "error"
+                            ? "bg-[var(--critical-solid)]"
+                            : node.status === "complete"
+                              ? "bg-[var(--success-solid)]"
+                              : node.status === "interrupted"
+                                ? "bg-[var(--warning-solid)]"
+                                : "bg-accent"
+                        }`}
+                        style={{ width: `${Math.min((node.duration_ms / 5000) * 100, 100)}%` }}
+                      />
                     </div>
-                  )}
-
-                  {/* Status text and error message */}
-                  <div className="mt-1 flex items-center gap-2">
-                    <span
-                      className={`text-xs font-medium ${
-                        node.status === "running"
-                          ? "text-blue-400 animate-pulse"
-                          : node.status === "error"
-                            ? "text-red-400"
-                            : node.status === "interrupted"
-                              ? "text-yellow-400"
-                              : "text-zinc-500"
-                      }`}
-                    >
-                      {node.status === "running" ? "Running…" : node.status.charAt(0).toUpperCase() + node.status.slice(1)}
+                    <span className="w-10 shrink-0 text-right text-xs text-ink-muted">
+                      {formatDuration(node.duration_ms)}
                     </span>
-                    {isCurrent && <span className="text-xs text-blue-400 font-medium">• Currently here</span>}
                   </div>
+                )}
 
-                  {/* Error message (if applicable) */}
-                  {node.error_message && (
-                    <p className="text-xs text-red-400 mt-2 p-2 bg-red-400/10 rounded border border-red-400/20">
-                      {node.error_message}
-                    </p>
-                  )}
-                </div>
+                {node.error_message && (
+                  <p className="mt-3 rounded-[0.9rem] border border-[var(--critical-border)] bg-[var(--critical-soft)] px-3 py-2 text-xs leading-5 text-[var(--critical-ink)]">
+                    {node.error_message}
+                  </p>
+                )}
               </div>
             </div>
           )
         })}
       </div>
 
-      {/* Footer: Last event info */}
       {isRunning && (
-        <div className="px-4 py-2 border-t border-zinc-800 text-xs text-zinc-500 bg-zinc-800/30">
-          <div className="flex items-center justify-between">
-            <span>Agent paused at "{NODE_DISPLAY_NAMES[currentNode || ""] || currentNode || "unknown"}"</span>
+        <footer className="border-t border-line bg-surface px-5 py-3 text-xs text-ink-muted">
+          <div className="flex items-center justify-between gap-3">
+            <span>
+              Agent currently at {NODE_DISPLAY_NAMES[currentNode || ""] || currentNode || "unknown"}
+            </span>
             {onInterrupt && (
               <button
+                type="button"
                 onClick={onInterrupt}
-                className="px-2 py-1 text-xs text-red-400 hover:bg-red-400/10 rounded border border-red-400/30"
+                className="rounded-full border border-[var(--critical-border)] bg-[var(--critical-soft)] px-3 py-2 font-medium text-[var(--critical-ink)] hover:-translate-y-0.5"
               >
-                Force Interrupt
+                Force interrupt
               </button>
             )}
           </div>
-        </div>
+        </footer>
       )}
-    </div>
+    </section>
   )
 }

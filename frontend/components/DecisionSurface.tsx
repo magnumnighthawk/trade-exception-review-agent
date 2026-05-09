@@ -32,16 +32,10 @@
 "use client"
 
 import { useState } from "react"
-import type { InterruptPayload, HumanDecision, DecisionAction, AgentStatus } from "@/lib/types"
 
-const RISK_STYLES: Record<string, { badge: string; bar: string }> = {
-  critical: { badge: "bg-red-500/20 text-red-400 border border-red-500/30",    bar: "bg-red-500" },
-  high:     { badge: "bg-orange-500/20 text-orange-400 border border-orange-500/30", bar: "bg-orange-500" },
-  medium:   { badge: "bg-yellow-500/20 text-yellow-400 border border-yellow-500/30", bar: "bg-yellow-500" },
-  low:      { badge: "bg-green-500/20 text-green-400 border border-green-500/30",  bar: "bg-green-500" },
-}
+import type { AgentStatus, DecisionAction, HumanDecision, InterruptPayload } from "@/lib/types"
+import { RISK_BADGE_CLASSES, getConfidenceBarClass } from "@/lib/theme"
 
-// Phase 4: Escalation categories for triage
 const ESCALATION_CATEGORIES = [
   "Senior Operator Review",
   "Counterparty Intervention",
@@ -50,10 +44,9 @@ const ESCALATION_CATEGORIES = [
   "External Escalation",
 ]
 
-// Phase 4: Confidence thresholds gate UI behavior
 const CONFIDENCE_THRESHOLDS = {
   AUTO_APPROVABLE: 0.85,
-  REQUIRES_REVIEW: 0.70,
+  REQUIRES_REVIEW: 0.7,
 }
 
 interface Props {
@@ -63,309 +56,388 @@ interface Props {
 }
 
 export function DecisionSurface({ status, interruptPayload, onDecision }: Props) {
+  if (status !== "waiting_human" || !interruptPayload) {
+    return (
+      <section className="panel flex h-full min-h-[24rem] flex-col overflow-hidden rounded-[1.75rem]">
+        <header className="panel-header border-b border-line px-5 py-4">
+          <h2 className="text-sm font-semibold text-ink-strong">Decision surface</h2>
+          <p className="mt-1 text-xs text-ink-muted">Awaiting the next proposal checkpoint</p>
+        </header>
+
+        <div className="flex flex-1 items-center justify-center px-5 py-6">
+          <div className="rounded-[1.4rem] border border-dashed border-line-strong bg-surface-muted px-8 py-10 text-center">
+            {status === "complete" && (
+              <>
+                <div className="text-3xl text-[var(--success-ink)]">✓</div>
+                <p className="mt-3 text-sm font-semibold text-[var(--success-ink)]">Case resolved</p>
+              </>
+            )}
+            {status === "escalated" && (
+              <>
+                <div className="text-3xl text-[var(--alert-ink)]">↗</div>
+                <p className="mt-3 text-sm font-semibold text-[var(--alert-ink)]">Escalated to the senior queue</p>
+              </>
+            )}
+            {status === "error" && (
+              <>
+                <div className="text-3xl text-[var(--critical-ink)]">×</div>
+                <p className="mt-3 text-sm font-semibold text-[var(--critical-ink)]">Agent error</p>
+              </>
+            )}
+            {(status === "idle" || status === "streaming" || status === "starting" || status === "resuming") && (
+              <p className="max-w-xs text-sm leading-6 text-ink-muted">
+                {status === "idle"
+                  ? "No active review is selected."
+                  : "The agent is still collecting evidence before a human decision is needed."}
+              </p>
+            )}
+          </div>
+        </div>
+      </section>
+    )
+  }
+
+  const payloadKey = [
+    interruptPayload.trade_id,
+    interruptPayload.proposal.action,
+    interruptPayload.confidence,
+  ].join("-")
+
+  return (
+    <ActiveDecisionSurface
+      key={payloadKey}
+      payload={interruptPayload}
+      onDecision={onDecision}
+    />
+  )
+}
+
+function ActiveDecisionSurface({
+  payload,
+  onDecision,
+}: {
+  payload: InterruptPayload
+  onDecision: (decision: HumanDecision) => void
+}) {
   const [mode, setMode] = useState<"review" | "reject" | "modify" | "escalate">("review")
   const [inputText, setInputText] = useState("")
   const [operatorId, setOperatorId] = useState("operator_001")
   const [reason, setReason] = useState("")
   const [escalationCategory, setEscalationCategory] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [formMessage, setFormMessage] = useState<string | null>(null)
 
-  // Reset local state when a new interrupt arrives
-  // (e.g. after a reject loop produces a new proposal)
-  const payload = interruptPayload
+  const resetReviewInputs = () => {
+    setMode("review")
+    setInputText("")
+    setReason("")
+    setEscalationCategory(null)
+    setFormMessage(null)
+  }
 
   const handleSubmit = async (action: DecisionAction) => {
-    if (!payload) return
-    // Phase 4: Confidence gating - low confidence cannot be approved
     if (action === "approve" && payload.confidence < CONFIDENCE_THRESHOLDS.REQUIRES_REVIEW) {
-      alert("Cannot approve: agent confidence is too low. Please modify or escalate.")
-      return
-    }
-    if ((action === "modify" || action === "reject") && !inputText.trim()) return
-    if (action === "escalate" && !escalationCategory) {
-      alert("Please select an escalation category.")
+      setFormMessage("Approval is locked below 70% confidence. Modify the plan or escalate it.")
       return
     }
 
+    if (!operatorId.trim()) {
+      setFormMessage("Operator ID is required for audit logging.")
+      return
+    }
+
+    if ((action === "modify" || action === "reject") && !inputText.trim()) {
+      setFormMessage("Add guidance before submitting this decision.")
+      return
+    }
+
+    if (action === "escalate" && !escalationCategory) {
+      setFormMessage("Choose an escalation category before sending the case onward.")
+      return
+    }
+
+    setFormMessage(null)
     setSubmitting(true)
+
     try {
       await onDecision({
         action,
         modification: inputText.trim() || null,
-        operator_id: operatorId,
+        operator_id: operatorId.trim(),
         reason: reason.trim() || null,
         confidence_before: payload.confidence,
         escalation_category: escalationCategory || null,
       })
+      resetReviewInputs()
     } finally {
       setSubmitting(false)
-      setMode("review")
-      setInputText("")
-      setReason("")
     }
   }
 
-  // ── Idle / non-HITL state ──────────────────────────────────────────────────
-  if (status !== "waiting_human" || !payload) {
-    return (
-      <div className="flex flex-col h-full bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
-        <div className="px-4 py-3 border-b border-zinc-800">
-          <h2 className="text-sm font-semibold text-zinc-100">Decision Surface</h2>
-          <p className="text-xs text-zinc-500 mt-0.5">Awaiting agent proposal</p>
-        </div>
-        <div className="flex-1 flex items-center justify-center">
-          {status === "complete" && (
-            <div className="text-center">
-              <div className="text-3xl mb-2">✅</div>
-              <p className="text-sm text-green-400 font-medium">Case resolved</p>
-            </div>
-          )}
-          {status === "escalated" && (
-            <div className="text-center">
-              <div className="text-3xl mb-2">↑</div>
-              <p className="text-sm text-orange-400 font-medium">Escalated to senior queue</p>
-            </div>
-          )}
-          {status === "error" && (
-            <div className="text-center">
-              <div className="text-3xl mb-2">❌</div>
-              <p className="text-sm text-red-400 font-medium">Agent error</p>
-            </div>
-          )}
-          {(status === "idle" || status === "streaming" || status === "starting" || status === "resuming") && (
-            <p className="text-xs text-zinc-600">
-              {status === "idle" ? "No active review" : "Agent is working…"}
-            </p>
-          )}
-        </div>
-      </div>
-    )
-  }
-
-  // ── Active HITL state ──────────────────────────────────────────────────────
   const proposal = payload.proposal
-  const risk = RISK_STYLES[proposal.risk_level] ?? RISK_STYLES.medium
   const confidencePct = Math.round(payload.confidence * 100)
   const isLowConfidence = payload.confidence < CONFIDENCE_THRESHOLDS.REQUIRES_REVIEW
+  const isHighConfidence = payload.confidence >= CONFIDENCE_THRESHOLDS.AUTO_APPROVABLE
   const canApprove = payload.confidence >= CONFIDENCE_THRESHOLDS.REQUIRES_REVIEW
 
   return (
-    <div className={`flex flex-col h-full bg-zinc-900 border rounded-lg overflow-hidden ${
-      isLowConfidence ? "border-red-500/40" : "border-yellow-500/30"
-    }`}>
-      {/* Header */}
-      <div className={`px-4 py-3 border-b border-zinc-800 flex items-center justify-between ${
-        isLowConfidence ? "bg-red-500/5" : "bg-yellow-500/5"
-      }`}>
-        <div>
-          <h2 className="text-sm font-semibold text-zinc-100">
-            {isLowConfidence ? "⚠️ Low Confidence Review Required" : "Decision Required"}
-          </h2>
-          <p className="text-xs text-zinc-400 mt-0.5">Trade {payload.trade_id} · ${payload.amount.toLocaleString()}</p>
-        </div>
-        <span className={`text-xs px-2 py-1 rounded font-medium ${risk.badge}`}>
-          {proposal.risk_level.toUpperCase()}
-        </span>
-      </div>
+    <section
+      className={`panel flex h-full min-h-[24rem] flex-col overflow-hidden rounded-[1.75rem] ${
+        isLowConfidence ? "border-[var(--critical-border)]" : "border-[var(--warning-border)]"
+      }`}
+    >
+      <header
+        className={`border-b px-5 py-4 ${
+          isLowConfidence
+            ? "border-[var(--critical-border)] bg-[var(--critical-soft)]"
+            : "border-[var(--warning-border)] bg-[var(--warning-soft)]"
+        }`}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-ink-strong">
+              {isLowConfidence ? "Low-confidence review required" : "Decision required"}
+            </h2>
+            <p className="mt-1 text-xs text-ink-muted">
+              Trade {payload.trade_id} · ${payload.amount.toLocaleString()}
+            </p>
+          </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {/* Confidence bar */}
-        <div>
-          <div className="flex justify-between text-xs mb-1">
-            <span className="text-zinc-400">Agent Confidence</span>
-            <span className={confidencePct < 70 ? "text-red-400 font-semibold" : "text-zinc-300"}>
+          <span
+            className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+              RISK_BADGE_CLASSES[proposal.risk_level] || RISK_BADGE_CLASSES.medium
+            }`}
+          >
+            {proposal.risk_level}
+          </span>
+        </div>
+      </header>
+
+      <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
+        <div className="rounded-[1.35rem] border border-line bg-surface-elevated p-4">
+          <div className="flex items-center justify-between gap-2 text-xs uppercase tracking-[0.18em]">
+            <span className="text-ink-soft">Agent confidence</span>
+            <span className={isLowConfidence ? "font-semibold text-[var(--critical-ink)]" : "text-ink-muted"}>
               {confidencePct}%
             </span>
           </div>
-          <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+          <div className="mt-3 h-2 rounded-full bg-surface-muted">
             <div
-              className={`h-full rounded-full transition-all ${risk.bar}`}
+              className={`h-2 rounded-full ${getConfidenceBarClass(confidencePct)}`}
               style={{ width: `${confidencePct}%` }}
             />
           </div>
-          {isLowConfidence && (
-            <p className="text-xs text-red-400 mt-2 p-2 bg-red-400/10 rounded border border-red-400/20">
-              🚫 Cannot approve at this confidence level. Modify or escalate.
-            </p>
-          )}
+
+          <p
+            className={`mt-3 rounded-[1rem] border px-3 py-2 text-xs leading-5 ${
+              isLowConfidence
+                ? "border-[var(--critical-border)] bg-[var(--critical-soft)] text-[var(--critical-ink)]"
+                : isHighConfidence
+                  ? "border-[var(--success-border)] bg-[var(--success-soft)] text-[var(--success-ink)]"
+                  : "border-[var(--warning-border)] bg-[var(--warning-soft)] text-[var(--warning-ink)]"
+            }`}
+          >
+            {isLowConfidence
+              ? "Approve is disabled below the review threshold. Provide a steering instruction or escalate the case."
+              : isHighConfidence
+                ? "High-confidence proposal: approval is available immediately, but you can still steer or escalate."
+                : "This proposal is within the review band. Validate the reasoning before approving."}
+          </p>
         </div>
 
-        {/* Proposal */}
-        <div className="bg-zinc-800/60 rounded-lg p-3 border border-zinc-700/50">
-          <p className="text-xs text-zinc-400 mb-1">Proposed Action</p>
-          <p className="text-sm font-medium text-zinc-100">{proposal.action}</p>
-          <p className="text-xs text-zinc-400 mt-2 leading-relaxed">{proposal.details}</p>
+        <div className="rounded-[1.35rem] border border-line bg-surface-elevated p-4">
+          <p className="text-xs uppercase tracking-[0.18em] text-ink-soft">Proposed action</p>
+          <p className="mt-3 text-base font-semibold text-ink-strong">{proposal.action}</p>
+          <p className="mt-2 text-sm leading-6 text-ink-muted">{proposal.details}</p>
         </div>
 
-        {/* Investigation summary */}
-        <div className="bg-zinc-800/40 rounded-lg p-3 border border-zinc-700/30">
-          <p className="text-xs text-zinc-500 mb-1">Root Cause</p>
-          <p className="text-xs text-zinc-300 leading-relaxed">{payload.investigation_summary}</p>
+        <div className="rounded-[1.35rem] border border-line bg-surface px-4 py-4">
+          <p className="text-xs uppercase tracking-[0.18em] text-ink-soft">Investigation summary</p>
+          <p className="mt-3 text-sm leading-6 text-ink">{payload.investigation_summary}</p>
         </div>
 
-        {/* Phase 4: Operator ID (audit capture) */}
-        {(mode === "review" || mode === "modify" || mode === "reject" || mode === "escalate") && (
-          <div className="bg-zinc-800/40 rounded-lg p-3 border border-zinc-700/30">
-            <label className="text-xs text-zinc-400 block mb-2">Your Operator ID</label>
-            <input
-              type="text"
-              value={operatorId}
-              onChange={(e) => setOperatorId(e.target.value)}
-              placeholder="e.g., ops_johndoe"
-              className="w-full bg-zinc-700 border border-zinc-600 rounded px-2 py-1 text-xs text-zinc-100 placeholder-zinc-500"
-            />
-          </div>
-        )}
+        <div className="rounded-[1.35rem] border border-line bg-surface px-4 py-4">
+          <label className="block text-xs uppercase tracking-[0.18em] text-ink-soft" htmlFor="operator-id">
+            Operator ID
+          </label>
+          <input
+            id="operator-id"
+            type="text"
+            value={operatorId}
+            onChange={(event) => setOperatorId(event.target.value)}
+            placeholder="ops_johndoe"
+            className="surface-field mt-3 w-full rounded-[1rem] px-3 py-2 text-sm"
+          />
+        </div>
 
-        {/* Modify/Reject/Escalate input */}
         {mode === "modify" && (
-          <div>
-            <label className="text-xs text-zinc-400 block mb-1.5">Modification instruction (required)</label>
+          <div className="rounded-[1.35rem] border border-line bg-surface px-4 py-4">
+            <label className="block text-xs uppercase tracking-[0.18em] text-ink-soft" htmlFor="modify-instruction">
+              Modification instruction
+            </label>
             <textarea
+              id="modify-instruction"
               autoFocus
-              rows={3}
+              rows={4}
               value={inputText}
-              onChange={e => setInputText(e.target.value)}
-              placeholder="Describe what the agent should do differently…"
-              className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 resize-none"
+              onChange={(event) => setInputText(event.target.value)}
+              placeholder="Describe what the agent should do differently."
+              className="surface-field mt-3 w-full resize-none rounded-[1rem] px-3 py-3 text-sm leading-6"
             />
           </div>
         )}
 
         {mode === "reject" && (
-          <div>
-            <label className="text-xs text-zinc-400 block mb-1.5">Rejection reason (required)</label>
+          <div className="rounded-[1.35rem] border border-line bg-surface px-4 py-4">
+            <label className="block text-xs uppercase tracking-[0.18em] text-ink-soft" htmlFor="reject-reason">
+              Rejection reason
+            </label>
             <textarea
+              id="reject-reason"
               autoFocus
-              rows={3}
+              rows={4}
               value={inputText}
-              onChange={e => setInputText(e.target.value)}
-              placeholder="Why is this proposal incorrect?"
-              className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 resize-none"
+              onChange={(event) => setInputText(event.target.value)}
+              placeholder="Explain why the proposal is incorrect."
+              className="surface-field mt-3 w-full resize-none rounded-[1rem] px-3 py-3 text-sm leading-6"
             />
           </div>
         )}
 
         {mode === "escalate" && (
-          <div>
-            <label className="text-xs text-zinc-400 block mb-2">Escalation Category</label>
-            <div className="space-y-2">
-              {ESCALATION_CATEGORIES.map((cat) => (
+          <div className="rounded-[1.35rem] border border-line bg-surface px-4 py-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-ink-soft">Escalation category</p>
+            <div className="mt-3 space-y-2">
+              {ESCALATION_CATEGORIES.map((category) => (
                 <button
-                  key={cat}
-                  onClick={() => setEscalationCategory(cat)}
-                  className={`w-full text-left px-3 py-2 text-xs rounded-lg border transition-all ${
-                    escalationCategory === cat
-                      ? "bg-orange-500/30 border-orange-500 text-orange-200"
-                      : "bg-zinc-800 border-zinc-700 text-zinc-300 hover:border-orange-500/50"
+                  key={category}
+                  type="button"
+                  onClick={() => {
+                    setEscalationCategory(category)
+                    setFormMessage(null)
+                  }}
+                  className={`w-full rounded-[1rem] border px-3 py-3 text-left text-sm ${
+                    escalationCategory === category
+                      ? "border-[var(--alert-border)] bg-[var(--alert-soft)] text-[var(--alert-ink)]"
+                      : "border-line bg-surface-muted text-ink hover:border-[var(--alert-border)] hover:bg-surface-hover"
                   }`}
                 >
-                  {cat}
+                  {category}
                 </button>
               ))}
             </div>
           </div>
         )}
 
-        {/* Decision reason (audit) */}
         {(mode === "modify" || mode === "reject" || mode === "escalate") && (
-          <div>
-            <label className="text-xs text-zinc-400 block mb-1.5">Decision Reason (Audit)</label>
+          <div className="rounded-[1.35rem] border border-line bg-surface px-4 py-4">
+            <label className="block text-xs uppercase tracking-[0.18em] text-ink-soft" htmlFor="audit-reason">
+              Decision reason
+            </label>
             <textarea
-              rows={2}
+              id="audit-reason"
+              rows={3}
               value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="Why are you making this decision?"
-              className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-blue-500 resize-none"
+              onChange={(event) => setReason(event.target.value)}
+              placeholder="Optional audit note describing why you chose this path."
+              className="surface-field mt-3 w-full resize-none rounded-[1rem] px-3 py-3 text-sm leading-6"
             />
           </div>
         )}
       </div>
 
-      {/* Action buttons */}
-      <div className="px-4 py-3 border-t border-zinc-800 space-y-2">
-        {mode === "review" && (
-          <>
-            <div className="grid grid-cols-2 gap-2">
-              {/* Approve - confidence gated */}
-              <button
-                disabled={!canApprove || submitting}
-                onClick={() => handleSubmit("approve")}
-                className={`py-2 px-3 rounded-lg text-white text-xs font-semibold transition-all ${
-                  canApprove
-                    ? "bg-green-600 hover:bg-green-500"
-                    : "bg-zinc-700 cursor-not-allowed opacity-40"
-                }`}
-                title={!canApprove ? "Confidence too low to approve" : ""}
-              >
-                ✓ Approve
-              </button>
-              {/* Escalate */}
-              <button
-                disabled={submitting}
-                onClick={() => setMode("escalate")}
-                className="py-2 px-3 rounded-lg bg-orange-600/80 hover:bg-orange-500 text-white text-xs font-semibold transition-colors disabled:opacity-50"
-              >
-                ↑ Escalate
-              </button>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              {/* Modify */}
-              <button
-                onClick={() => setMode("modify")}
-                className="py-2 px-3 rounded-lg bg-blue-600/80 hover:bg-blue-500 text-white text-xs font-semibold transition-colors"
-              >
-                ✎ Modify
-              </button>
-              {/* Reject */}
-              <button
-                onClick={() => setMode("reject")}
-                className="py-2 px-3 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-zinc-200 text-xs font-semibold transition-colors"
-              >
-                ✗ Reject
-              </button>
-            </div>
-          </>
+      <footer className="border-t border-line px-5 py-4">
+        {formMessage && (
+          <div className="mb-3 rounded-[1rem] border border-[var(--critical-border)] bg-[var(--critical-soft)] px-3 py-2 text-xs leading-5 text-[var(--critical-ink)]">
+            {formMessage}
+          </div>
         )}
 
-        {(mode === "modify" || mode === "reject" || mode === "escalate") && (
+        {mode === "review" ? (
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                disabled={!canApprove || submitting}
+                onClick={() => void handleSubmit("approve")}
+                className={`rounded-full px-3 py-3 text-xs font-semibold uppercase tracking-[0.16em] ${
+                  canApprove
+                    ? "bg-[var(--success-solid)] text-[var(--accent-contrast)] hover:-translate-y-0.5"
+                    : "bg-surface-muted text-ink-soft opacity-55"
+                }`}
+              >
+                Approve
+              </button>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => {
+                  setMode("escalate")
+                  setFormMessage(null)
+                }}
+                className="rounded-full bg-[var(--alert-solid)] px-3 py-3 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--accent-contrast)] hover:-translate-y-0.5 disabled:opacity-50"
+              >
+                Escalate
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setMode("modify")
+                  setFormMessage(null)
+                }}
+                className="rounded-full bg-accent px-3 py-3 text-xs font-semibold uppercase tracking-[0.16em] text-accent-contrast hover:-translate-y-0.5"
+              >
+                Modify
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setMode("reject")
+                  setFormMessage(null)
+                }}
+                className="rounded-full border border-line-strong bg-surface px-3 py-3 text-xs font-semibold uppercase tracking-[0.16em] text-ink hover:bg-surface-hover"
+              >
+                Reject
+              </button>
+            </div>
+          </div>
+        ) : (
           <div className="grid grid-cols-2 gap-2">
             <button
-              onClick={() => {
-                setMode("review")
-                setInputText("")
-                setReason("")
-                setEscalationCategory(null)
-              }}
-              className="py-2 px-3 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-zinc-200 text-xs font-semibold transition-colors"
+              type="button"
+              onClick={resetReviewInputs}
+              className="rounded-full border border-line-strong bg-surface px-3 py-3 text-xs font-semibold uppercase tracking-[0.16em] text-ink hover:bg-surface-hover"
             >
-              ← Back
+              Back
             </button>
             <button
+              type="button"
               disabled={(mode !== "escalate" && !inputText.trim()) || !operatorId.trim() || submitting}
-              onClick={() => handleSubmit(mode as DecisionAction)}
-              className="py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold transition-colors disabled:opacity-40"
+              onClick={() => void handleSubmit(mode as DecisionAction)}
+              className="rounded-full bg-accent px-3 py-3 text-xs font-semibold uppercase tracking-[0.16em] text-accent-contrast hover:-translate-y-0.5 disabled:translate-y-0 disabled:opacity-45"
             >
               {submitting
-                ? "Submitting…"
+                ? "Submitting"
                 : mode === "modify"
-                  ? "Submit Modification"
+                  ? "Submit modification"
                   : mode === "reject"
-                    ? "Send for Reinvestigation"
-                    : "Escalate"}
+                    ? "Send for reinvestigation"
+                    : "Escalate case"}
             </button>
           </div>
         )}
 
-        {/* LEARNING hint */}
-        <p className="text-xs text-zinc-600 text-center pt-1">
+        <p className="mt-3 text-center text-xs text-ink-soft">
           {mode === "modify"
-            ? "Modify = steering. Your instruction goes into the agent's next investigation."
+            ? "Modify steers the next investigation with your instruction."
             : mode === "reject"
-            ? "Reject = the agent re-investigates with your reason as context."
-            : "Approve or modify to proceed · Escalate to senior queue"}
+              ? "Reject returns the case for another investigation pass."
+              : "Approve, modify, or escalate while the agent is checkpointed."}
         </p>
-      </div>
-    </div>
+      </footer>
+    </section>
   )
 }
