@@ -10,6 +10,10 @@ The project pairs a **LangGraph + FastAPI backend** with a **Next.js supervision
 - resumes from checkpoints,
 - and handles low-confidence, missing-information, and recovery flows safely.
 
+<p align="center">
+  <img src="frontend/public/4f529de63341a465.gif" alt="Trade Exception Review Agent application demo" width="100%" />
+</p>
+
 ## Capabilities
 
 - Typed agent state and graph-based exception handling
@@ -38,7 +42,6 @@ frontend/
   app/             Next.js app routes
   components/      Supervision surface UI
   hooks/           Streaming and supervision state hooks
-docs/              Supporting notes and reference material
 ```
 
 ## Quick start
