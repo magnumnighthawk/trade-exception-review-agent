@@ -19,16 +19,22 @@ import logging
 from datetime import datetime, timezone
 from functools import lru_cache
 
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.types import interrupt
 
-from backend.agent.state import TradeExceptionState, AuditEntry
+from backend.agent.policy import (
+    MAX_EXECUTION_RETRIES,
+    MAX_INVESTIGATION_ATTEMPTS,
+    approval_locked,
+    build_review_policy,
+)
 from backend.agent.prompts import (
+    build_execution_confirmation_prompt,
     build_investigation_prompt,
     build_proposal_prompt,
-    build_execution_confirmation_prompt,
 )
+from backend.agent.state import AuditEntry, FailureContext, TradeExceptionState
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +46,10 @@ def _get_llm() -> ChatOpenAI:
     global. This means the LLM client is only created the first time a node runs,
     not at import time. This makes the module importable even without an API key
     set — useful for testing, CI, and import-time graph compilation.
-
-    TRADE-OFF: lru_cache means the LLM is a singleton per process. If you need
-    per-request model config (e.g. different temperature per node), create the
-    LLM inside each node call instead.
     """
+
     from dotenv import load_dotenv
+
     load_dotenv("backend/.env")
     return ChatOpenAI(model="gpt-4o", temperature=0)
 
@@ -53,19 +57,10 @@ def _get_llm() -> ChatOpenAI:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _now() -> str:
-    """Return current UTC time as ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _audit(event_type: str, node: str | None, details: str) -> AuditEntry:
-    """
-    LEARNING: Every significant event gets an audit entry.
-    We use a helper so the shape is consistent everywhere.
-
-    PRODUCTION: In a real system you'd also include: operator_id (for human
-    events), session_id, environment, and a hash of the state at that point
-    for tamper detection.
-    """
     return AuditEntry(
         timestamp=_now(),
         event_type=event_type,
@@ -75,45 +70,119 @@ def _audit(event_type: str, node: str | None, details: str) -> AuditEntry:
 
 
 def _parse_llm_json(raw: str, node_name: str) -> dict:
-    """
-    Parse JSON from an LLM response. Handles models that sometimes wrap
-    JSON in markdown code fences despite being told not to.
-
-    PRODUCTION: You'd use a structured output / response_format approach
-    in production (OpenAI supports JSON mode and function calling).
-    We parse manually here to understand the mechanism before abstracting it.
-    """
     try:
-        # Strip markdown fences if model added them anyway
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
             cleaned = "\n".join(lines[1:-1])
         return json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        logger.error(f"[{node_name}] Failed to parse LLM JSON: {e}\nRaw output: {raw}")
-        raise ValueError(f"LLM returned invalid JSON in {node_name}") from e
+    except json.JSONDecodeError as error:
+        logger.error("[%s] Failed to parse LLM JSON: %s\nRaw output: %s", node_name, error, raw)
+        raise ValueError(f"LLM returned invalid JSON in {node_name}") from error
+
+
+def _scenario(state: TradeExceptionState) -> dict:
+    return state["exception"].get("scenario") or {}
+
+
+def _format_context_summary(context_fields: dict[str, str]) -> str:
+    return ", ".join(f"{key}={value}" for key, value in context_fields.items())
+
+
+def _build_failure_context(
+    *,
+    category: str,
+    failed_node: str,
+    message: str,
+    recoverable: bool,
+    retry_available: bool,
+    retry_count: int,
+) -> FailureContext:
+    return FailureContext(
+        category=category,
+        failed_node=failed_node,
+        message=message,
+        recoverable=recoverable,
+        retry_available=retry_available,
+        retry_count=retry_count,
+    )
+
+
+def _needs_information_request(state: TradeExceptionState) -> bool:
+    scenario = _scenario(state)
+    return bool(scenario.get("requires_information_request")) and not state.get("additional_context")
+
+
+def _build_information_request_payload(state: TradeExceptionState, attempt: int) -> dict:
+    scenario = _scenario(state)
+    fields_needed = scenario.get("information_request_fields") or ["source_of_truth"]
+    question = scenario.get("information_request_question") or (
+        "The agent cannot resolve this exception safely. Please provide the source-of-truth details needed to continue."
+    )
+
+    return {
+        "kind": "information_request",
+        "trade_id": state["exception"]["trade_id"],
+        "question": question,
+        "fields_needed": fields_needed,
+        "attempt": attempt,
+        "context_summary": state["exception"]["reason"],
+        "policy": build_review_policy(),
+    }
+
+
+def _apply_proposal_policy(state: TradeExceptionState, proposal: dict) -> dict:
+    scenario = _scenario(state)
+    forced_confidence = scenario.get("force_low_confidence_proposal")
+    if forced_confidence is not None:
+        proposal["confidence"] = forced_confidence
+
+    proposal["requires_human_approval"] = True
+    return proposal
+
+
+def _build_proposal_interrupt_payload(state: TradeExceptionState, proposal: dict) -> dict:
+    exc = state["exception"]
+    investigation = state["investigation"]
+
+    return {
+        "kind": "proposal_review",
+        "trade_id": exc["trade_id"],
+        "proposal": proposal,
+        "investigation_summary": investigation["root_cause"],
+        "confidence": proposal["confidence"],
+        "risk_level": proposal["risk_level"],
+        "amount": exc["amount"],
+        "policy": build_review_policy(),
+    }
+
+
+def _build_failure_recovery_payload(
+    state: TradeExceptionState,
+    *,
+    failure_context: FailureContext,
+) -> dict:
+    exc = state["exception"]
+    latest_proposal = state.get("proposal")
+
+    return {
+        "kind": "failure_recovery",
+        "trade_id": exc["trade_id"],
+        "failed_node": failure_context["failed_node"],
+        "error_message": failure_context["message"],
+        "recoverable": failure_context["recoverable"],
+        "retry_available": failure_context["retry_available"],
+        "retry_count": failure_context["retry_count"],
+        "latest_proposal": latest_proposal,
+        "policy": build_review_policy(),
+    }
 
 
 # ── Node 1: Receive Exception ──────────────────────────────────────────────────
 
 def receive_exception_node(state: TradeExceptionState) -> dict:
-    """
-    LEARNING: This node does almost no work — it just validates the incoming
-    exception and initialises bookkeeping fields. Its value is as a clear
-    entry point in the graph. Every run starts here.
-
-    In a production system, this node would:
-    - Validate the exception schema (Pydantic)
-    - Enrich it with data from upstream systems (trade date, settlement date, etc.)
-    - Assign a priority based on amount and exception type
-    - Write the initial record to the database
-
-    Pattern to remember: the first node is always an ingestion/validation node.
-    Never start processing without a clean input boundary.
-    """
     exc = state["exception"]
-    logger.info(f"[receive_exception] Received exception {exc['trade_id']}")
+    logger.info("[receive_exception] Received exception %s", exc["trade_id"])
 
     audit_entry = _audit(
         event_type="exception_received",
@@ -124,6 +193,15 @@ def receive_exception_node(state: TradeExceptionState) -> dict:
     return {
         "status": "received",
         "investigation_attempts": 0,
+        "execution_attempts": 0,
+        "investigation": state.get("investigation"),
+        "proposal": state.get("proposal"),
+        "human_decision": state.get("human_decision"),
+        "additional_context": state.get("additional_context"),
+        "execution_result": state.get("execution_result"),
+        "escalation_reason": state.get("escalation_reason"),
+        "failure_context": state.get("failure_context"),
+        "manual_takeover_note": state.get("manual_takeover_note"),
         "audit_log": state.get("audit_log", []) + [audit_entry],
     }
 
@@ -131,32 +209,93 @@ def receive_exception_node(state: TradeExceptionState) -> dict:
 # ── Node 2: Investigate ────────────────────────────────────────────────────────
 
 def investigate_node(state: TradeExceptionState) -> dict:
-    """
-    LEARNING: This is the core "thinking" node. The agent reads the exception,
-    reasons about root cause, and produces structured investigation output.
-
-    Notice the pattern:
-    1. Build a prompt using state (prompts.py keeps this logic separate)
-    2. Call the LLM
-    3. Parse the structured output
-    4. Return state updates
-
-    The investigation_attempts counter is important — it lets us detect
-    infinite loops if the agent keeps getting rejected. In Phase 5
-    (failure handling), we'll add a max-retry guard here.
-    """
     exc = state["exception"]
     attempt = state.get("investigation_attempts", 0) + 1
-    logger.info(f"[investigate] Starting investigation attempt {attempt} for {exc['trade_id']}")
+    logger.info("[investigate] Starting investigation attempt %s for %s", attempt, exc["trade_id"])
 
-    prompt = build_investigation_prompt(state)
-    response = _get_llm().invoke([
-        SystemMessage(content="You are a trade exception specialist. Respond with valid JSON only."),
-        HumanMessage(content=prompt),
-    ])
+    if attempt > MAX_INVESTIGATION_ATTEMPTS:
+        reason = f"Retry ceiling reached after {state.get('investigation_attempts', 0)} investigation attempts."
+        failure_context = _build_failure_context(
+            category="retry_limit",
+            failed_node="investigate",
+            message=reason,
+            recoverable=False,
+            retry_available=False,
+            retry_count=state.get("investigation_attempts", 0),
+        )
+        audit_entry = _audit(
+            event_type="manual_takeover_required",
+            node="investigate",
+            details=reason,
+        )
+        return {
+            "status": "manual_takeover",
+            "failure_context": failure_context,
+            "manual_takeover_note": reason,
+            "audit_log": state.get("audit_log", []) + [audit_entry],
+        }
 
-    raw = response.content
-    result = _parse_llm_json(raw, "investigate_node")
+    audit_entries: list[AuditEntry] = []
+    additional_context = dict(state.get("additional_context") or {})
+
+    if _needs_information_request(state):
+        request_payload = _build_information_request_payload(state, attempt)
+        request_audit = _audit(
+            event_type="information_requested",
+            node="investigate",
+            details=f"Agent requested additional context: {request_payload['question']}",
+        )
+
+        # HITL: The agent cannot safely investigate further without a human
+        # supplying a source-of-truth answer, so execution is checkpointed here.
+        human_response = interrupt(request_payload)
+
+        if human_response["action"] == "escalate":
+            reason = human_response.get("reason") or "Escalated during information request."
+            failure_context = _build_failure_context(
+                category="insufficient_information",
+                failed_node="investigate",
+                message=reason,
+                recoverable=False,
+                retry_available=False,
+                retry_count=attempt - 1,
+            )
+            response_audit = _audit(
+                event_type="information_request_escalated",
+                node="investigate",
+                details=reason,
+            )
+            return {
+                "status": "escalated",
+                "escalation_reason": reason,
+                "failure_context": failure_context,
+                "audit_log": state.get("audit_log", []) + [request_audit, response_audit],
+            }
+
+        context_fields = human_response.get("context_fields") or {}
+        additional_context.update(context_fields)
+        response_audit = _audit(
+            event_type="information_received",
+            node="investigate",
+            details=f"Operator provided context: {_format_context_summary(context_fields)}",
+        )
+        audit_entries.extend([request_audit, response_audit])
+
+    working_state: TradeExceptionState = {
+        **state,
+        "additional_context": additional_context or None,
+        "investigation_attempts": attempt,
+    }
+
+    prompt = build_investigation_prompt(working_state)
+    response = _get_llm().invoke(
+        [
+            SystemMessage(content="You are a trade exception specialist. Respond with valid JSON only."),
+            HumanMessage(content=prompt),
+        ]
+    )
+
+    result = _parse_llm_json(response.content, "investigate_node")
 
     audit_entry = _audit(
         event_type="investigation_complete",
@@ -164,50 +303,34 @@ def investigate_node(state: TradeExceptionState) -> dict:
         details=f"Attempt {attempt} — root cause: {result['root_cause'][:80]} — confidence: {result['confidence']}",
     )
 
-    logger.info(f"[investigate] Confidence: {result['confidence']} — {result['root_cause'][:60]}")
+    logger.info("[investigate] Confidence: %s — %s", result["confidence"], result["root_cause"][:60])
 
     return {
         "status": "investigating",
         "investigation": result,
         "investigation_attempts": attempt,
-        "audit_log": state.get("audit_log", []) + [audit_entry],
+        "additional_context": additional_context or None,
+        "failure_context": None,
+        "manual_takeover_note": None,
+        "audit_log": state.get("audit_log", []) + audit_entries + [audit_entry],
     }
 
 
 # ── Node 3: Propose Resolution ─────────────────────────────────────────────────
 
 def propose_resolution_node(state: TradeExceptionState) -> dict:
-    """
-    LEARNING: This node does two distinct things:
-    1. Generates the resolution proposal using the LLM
-    2. Hits the HITL interrupt — pausing execution and surfacing the proposal to a human
-
-    The interrupt() call is the pivotal moment in this entire codebase.
-    When Python execution reaches interrupt(), LangGraph:
-    - Serialises the current state to the checkpointer
-    - Returns control to the caller (your API or test harness)
-    - Waits — indefinitely — until Command(resume=...) is called with this thread_id
-
-    The agent is NOT running during this time. It is checkpointed.
-    The thread_id is your reconnection key.
-
-    HITL: This is the primary human approval gate. The agent has done its
-    analysis and is now asking: "Is my proposal correct?"
-
-    TRADE-OFF: We could auto-approve if confidence > 0.85. That's a policy
-    decision. For Phase 1 we always interrupt so you can see the mechanism.
-    In Phase 3, we'll add the confidence-based bypass.
-    """
     exc = state["exception"]
-    logger.info(f"[propose_resolution] Building proposal for {exc['trade_id']}")
+    logger.info("[propose_resolution] Building proposal for %s", exc["trade_id"])
 
     prompt = build_proposal_prompt(state)
-    response = _get_llm().invoke([
-        SystemMessage(content="You are a trade exception specialist. Respond with valid JSON only."),
-        HumanMessage(content=prompt),
-    ])
+    response = _get_llm().invoke(
+        [
+            SystemMessage(content="You are a trade exception specialist. Respond with valid JSON only."),
+            HumanMessage(content=prompt),
+        ]
+    )
 
-    proposal = _parse_llm_json(response.content, "propose_resolution_node")
+    proposal = _apply_proposal_policy(state, _parse_llm_json(response.content, "propose_resolution_node"))
 
     audit_entry = _audit(
         event_type="proposal_ready",
@@ -215,22 +338,12 @@ def propose_resolution_node(state: TradeExceptionState) -> dict:
         details=f"Proposal: {proposal['action']} — confidence: {proposal['confidence']} — risk: {proposal['risk_level']}",
     )
 
-    logger.info(f"[propose_resolution] Proposal ready — confidence: {proposal['confidence']}")
+    logger.info("[propose_resolution] Proposal ready — confidence: %s", proposal["confidence"])
 
-    # HITL: Pause execution here. The dict passed to interrupt() is what
-    # your frontend will receive to render the DecisionSurface.
-    # This call does not return until a human submits a decision.
-    human_decision = interrupt({
-        "trade_id": exc["trade_id"],
-        "proposal": proposal,
-        "investigation_summary": state["investigation"]["root_cause"],
-        "confidence": proposal["confidence"],
-        "risk_level": proposal["risk_level"],
-        "amount": exc["amount"],
-    })
+    # HITL: Proposal review remains the primary approval gate, but Phase 5 now
+    # attaches typed policy metadata so the frontend and backend enforce the same rules.
+    human_decision = interrupt(_build_proposal_interrupt_payload(state, proposal))
 
-    # Execution resumes here after the human has decided.
-    # human_decision is the dict the operator submitted.
     decision_audit = _audit(
         event_type="human_decision_received",
         node="propose_resolution",
@@ -240,7 +353,8 @@ def propose_resolution_node(state: TradeExceptionState) -> dict:
     return {
         "proposal": proposal,
         "human_decision": human_decision,
-        "status": "awaiting_human",    # Will be updated by the next node
+        "status": "awaiting_human",
+        "failure_context": None,
         "audit_log": state.get("audit_log", []) + [audit_entry, decision_audit],
     }
 
@@ -248,32 +362,38 @@ def propose_resolution_node(state: TradeExceptionState) -> dict:
 # ── Node 4: Execute Resolution ─────────────────────────────────────────────────
 
 def execute_resolution_node(state: TradeExceptionState) -> dict:
-    """
-    LEARNING: This node only runs after a human decision is in state.
-    It branches on the decision action:
-    - approve → execute the proposal as-is
-    - modify  → execute the modified version (steering pattern)
-    - reject  → do NOT execute; the graph will loop back to investigate
-    - escalate → do NOT execute; route to senior queue
-
-    The reject and escalate branches return early without executing.
-    The graph routing logic (in graph.py) reads the returned status
-    to decide which node to go to next.
-
-    PRODUCTION: The actual "execution" here would be API calls to:
-    - Settlement system (DTCC, Euroclear)
-    - Internal trade management system
-    - Notification service (to alert counterparty)
-    These would be LangGraph tools in a later phase.
-    """
     decision = state["human_decision"]
     exc = state["exception"]
     action = decision["action"]
 
-    logger.info(f"[execute_resolution] Action: {action} for {exc['trade_id']}")
+    logger.info("[execute_resolution] Action: %s for %s", action, exc["trade_id"])
 
-    # ── Reject path ────────────────────────────────────────────────────────────
     if action == "reject":
+        if state.get("investigation_attempts", 0) >= MAX_INVESTIGATION_ATTEMPTS:
+            reason = (
+                f"Proposal rejected after {state.get('investigation_attempts', 0)} investigation attempts. "
+                "Case handed to human operator for manual resolution."
+            )
+            failure_context = _build_failure_context(
+                category="retry_limit",
+                failed_node="execute_resolution",
+                message=reason,
+                recoverable=False,
+                retry_available=False,
+                retry_count=state.get("investigation_attempts", 0),
+            )
+            audit_entry = _audit(
+                event_type="manual_takeover_required",
+                node="execute_resolution",
+                details=reason,
+            )
+            return {
+                "status": "manual_takeover",
+                "failure_context": failure_context,
+                "manual_takeover_note": reason,
+                "audit_log": state.get("audit_log", []) + [audit_entry],
+            }
+
         audit_entry = _audit(
             event_type="resolution_rejected",
             node="execute_resolution",
@@ -281,12 +401,14 @@ def execute_resolution_node(state: TradeExceptionState) -> dict:
         )
         return {
             "status": "rejected",
+            "failure_context": None,
             "audit_log": state.get("audit_log", []) + [audit_entry],
         }
 
-    # ── Escalate path ──────────────────────────────────────────────────────────
     if action == "escalate":
-        reason = decision.get("modification") or f"Escalated by {decision['operator_id']} — no modification note"
+        reason = decision.get("reason") or decision.get("modification") or (
+            f"Escalated by {decision['operator_id']} — no additional note"
+        )
         audit_entry = _audit(
             event_type="case_escalated",
             node="execute_resolution",
@@ -295,20 +417,96 @@ def execute_resolution_node(state: TradeExceptionState) -> dict:
         return {
             "status": "escalated",
             "escalation_reason": reason,
+            "failure_context": None,
             "audit_log": state.get("audit_log", []) + [audit_entry],
         }
 
-    # ── Approve / Modify path ──────────────────────────────────────────────────
-    # Both "approve" and "modify" result in execution.
-    # For "modify", the modified_resolution from the operator is used instead.
-    # HITL: This is the "steering" pattern — the human's modification is
-    # treated as part of the agent's operating context.
+    execution_attempt = state.get("execution_attempts", 0) + 1
+    audit_entries: list[AuditEntry] = []
+    scenario = _scenario(state)
+
+    if scenario.get("simulate_recoverable_execution_failure") and execution_attempt == 1:
+        failure_message = scenario.get("recoverable_failure_message") or (
+            "Execution confirmation step failed before settlement could be confirmed."
+        )
+        failure_context = _build_failure_context(
+            category="execution_error",
+            failed_node="execute_resolution",
+            message=failure_message,
+            recoverable=True,
+            retry_available=execution_attempt < MAX_EXECUTION_RETRIES,
+            retry_count=execution_attempt,
+        )
+        request_audit = _audit(
+            event_type="recovery_requested",
+            node="execute_resolution",
+            details=failure_message,
+        )
+
+        # HITL: A recoverable execution failure does not silently flip to error.
+        # The human is asked whether to retry, take manual control, or escalate.
+        recovery_decision = interrupt(
+            _build_failure_recovery_payload(
+                state,
+                failure_context=failure_context,
+            )
+        )
+
+        if recovery_decision["action"] == "manual_takeover":
+            note = recovery_decision.get("reason") or recovery_decision.get("modification") or (
+                "Operator took manual ownership after recoverable execution failure."
+            )
+            response_audit = _audit(
+                event_type="manual_takeover_confirmed",
+                node="execute_resolution",
+                details=note,
+            )
+            return {
+                "status": "manual_takeover",
+                "execution_attempts": execution_attempt,
+                "failure_context": {
+                    **failure_context,
+                    "category": "manual_takeover",
+                    "recoverable": False,
+                    "retry_available": False,
+                },
+                "manual_takeover_note": note,
+                "audit_log": state.get("audit_log", []) + [request_audit, response_audit],
+            }
+
+        if recovery_decision["action"] == "escalate":
+            reason = recovery_decision.get("reason") or "Escalated after recoverable execution failure."
+            response_audit = _audit(
+                event_type="recovery_escalated",
+                node="execute_resolution",
+                details=reason,
+            )
+            return {
+                "status": "escalated",
+                "execution_attempts": execution_attempt,
+                "escalation_reason": reason,
+                "failure_context": {
+                    **failure_context,
+                    "recoverable": False,
+                    "retry_available": False,
+                },
+                "audit_log": state.get("audit_log", []) + [request_audit, response_audit],
+            }
+
+        response_audit = _audit(
+            event_type="recovery_retry_approved",
+            node="execute_resolution",
+            details=f"Operator {recovery_decision.get('operator_id', 'unknown')} approved retry.",
+        )
+        audit_entries.extend([request_audit, response_audit])
 
     prompt = build_execution_confirmation_prompt(state)
-    response = _get_llm().invoke([
-        SystemMessage(content="You are confirming a trade exception resolution. Be concise and precise."),
-        HumanMessage(content=prompt),
-    ])
+    response = _get_llm().invoke(
+        [
+            SystemMessage(content="You are confirming a trade exception resolution. Be concise and precise."),
+            HumanMessage(content=prompt),
+        ]
+    )
 
     execution_result = response.content.strip()
 
@@ -318,10 +516,13 @@ def execute_resolution_node(state: TradeExceptionState) -> dict:
         details=f"Resolution executed — action: {action} — result: {execution_result[:100]}",
     )
 
-    logger.info(f"[execute_resolution] Complete for {exc['trade_id']}")
+    logger.info("[execute_resolution] Complete for %s", exc["trade_id"])
 
     return {
         "status": "complete",
         "execution_result": execution_result,
-        "audit_log": state.get("audit_log", []) + [audit_entry],
+        "execution_attempts": execution_attempt,
+        "failure_context": None,
+        "manual_takeover_note": None,
+        "audit_log": state.get("audit_log", []) + audit_entries + [audit_entry],
     }

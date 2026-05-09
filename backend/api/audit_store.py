@@ -41,6 +41,7 @@ class AuditEntry:
     confidence_before: Optional[float] = None
     agent_proposal_before: Optional[str] = None
     escalation_category: Optional[str] = None
+    context_fields: Optional[dict[str, str]] = None
 
     def to_dict(self) -> dict:
         return {
@@ -55,6 +56,7 @@ class AuditEntry:
             "confidence_before": self.confidence_before,
             "agent_proposal_before": self.agent_proposal_before,
             "escalation_category": self.escalation_category,
+            "context_fields": self.context_fields,
         }
 
 
@@ -81,6 +83,7 @@ class AuditTrailStore:
         confidence_before: Optional[float] = None,
         agent_proposal_before: Optional[str] = None,
         escalation_category: Optional[str] = None,
+        context_fields: Optional[dict[str, str]] = None,
     ) -> AuditEntry:
         """
         Log a human decision. Returns the audit entry that was recorded.
@@ -98,6 +101,7 @@ class AuditTrailStore:
             confidence_before=confidence_before,
             agent_proposal_before=agent_proposal_before,
             escalation_category=escalation_category,
+            context_fields=context_fields,
         )
 
         with self._lock:

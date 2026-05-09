@@ -3,36 +3,30 @@
  *
  * LEARNING: These types mirror the Pydantic models in backend/api/models.py.
  * Keeping them in sync is a discipline concern — in production you'd generate
- * them automatically from the OpenAPI schema (e.g. openapi-typescript).
- *
- * The discriminated union pattern for SSE events is the key thing to study here.
- * TypeScript narrows the type based on the `type` field, so each event handler
- * only sees the fields that actually exist on that event shape.
+ * them automatically from the OpenAPI schema.
  */
 
-// ── Agent status — discriminated union ────────────────────────────────────────
-// LEARNING: This is NOT an enum. It's a union of string literals.
-// Every component that renders based on agent status branches on this type.
-// Adding a new status means the TypeScript compiler forces you to handle it
-// everywhere — that's the safety guarantee.
 export type AgentStatus =
-  | "idle" // No agent running yet
-  | "starting" // POST /review/start in-flight
-  | "streaming" // SSE connected, agent is running
-  | "waiting_human" // Agent hit interrupt() — HITL gate open
-  | "resuming" // Human submitted decision, agent resuming
-  | "complete" // Agent finished successfully
-  | "escalated" // Case escalated to senior queue
-  | "error" // Agent encountered an unrecoverable error
+  | "idle"
+  | "starting"
+  | "streaming"
+  | "waiting_human"
+  | "resuming"
+  | "complete"
+  | "escalated"
+  | "manual_takeover"
+  | "error"
 
 export type ThreadStageStatus = "running" | "complete" | "error"
-
-// ── SSE event types — discriminated union on `type` ──────────────────────────
-// LEARNING: Every event from the SSE stream has a `type` field.
-// We union all possible shapes here. When you do:
-//   if (event.type === "hitl_interrupt") { ... }
-// TypeScript narrows `event` to HitlInterruptEvent inside the block.
-// This is safe, exhaustive, and documents the full event contract.
+export type InterventionKind = "proposal_review" | "information_request" | "failure_recovery"
+export type DecisionAction =
+  | "approve"
+  | "reject"
+  | "modify"
+  | "escalate"
+  | "provide_context"
+  | "retry"
+  | "manual_takeover"
 
 export interface TokenEvent {
   type: "token"
@@ -52,12 +46,6 @@ export interface NodeCompleteEvent {
   state_snapshot: Partial<AgentStateSnapshot> | null
 }
 
-export interface HitlInterruptEvent {
-  type: "hitl_interrupt"
-  thread_id: string
-  interrupt_payload: InterruptPayload
-}
-
 export interface CompleteEvent {
   type: "complete"
   status: string
@@ -68,17 +56,15 @@ export interface ErrorEvent {
   type: "error"
   message: string
   recoverable: boolean
+  failure_context?: FailureContext | null
 }
 
-export type SSEEvent =
-  | TokenEvent
-  | NodeStartEvent
-  | NodeCompleteEvent
-  | HitlInterruptEvent
-  | CompleteEvent
-  | ErrorEvent
-
-// ── Domain types ──────────────────────────────────────────────────────────────
+export interface ReviewPolicyPayload {
+  low_confidence_threshold: number
+  high_confidence_threshold: number
+  max_investigation_attempts: number
+  max_execution_retries: number
+}
 
 export interface TradeException {
   trade_id: string
@@ -104,24 +90,78 @@ export interface ResolutionProposal {
   risk_level: "low" | "medium" | "high" | "critical"
 }
 
-// The payload the agent sends to interrupt() — what DecisionSurface renders
-export interface InterruptPayload {
+export interface FailureContext {
+  category: "insufficient_information" | "retry_limit" | "execution_error" | "manual_takeover"
+  failed_node: string
+  message: string
+  recoverable: boolean
+  retry_available: boolean
+  retry_count: number
+}
+
+export interface ProposalReviewInterruptPayload {
+  kind: "proposal_review"
   trade_id: string
   proposal: ResolutionProposal
   investigation_summary: string
   confidence: number
   risk_level: "low" | "medium" | "high" | "critical"
   amount: number
+  policy: ReviewPolicyPayload
 }
 
-// Partial snapshot of agent state for UI display
+export interface InformationRequestInterruptPayload {
+  kind: "information_request"
+  trade_id: string
+  question: string
+  fields_needed: string[]
+  attempt: number
+  context_summary: string
+  policy: ReviewPolicyPayload
+}
+
+export interface FailureRecoveryInterruptPayload {
+  kind: "failure_recovery"
+  trade_id: string
+  failed_node: string
+  error_message: string
+  recoverable: boolean
+  retry_available: boolean
+  retry_count: number
+  latest_proposal: ResolutionProposal | null
+  policy: ReviewPolicyPayload
+}
+
+export type InterruptPayload =
+  | ProposalReviewInterruptPayload
+  | InformationRequestInterruptPayload
+  | FailureRecoveryInterruptPayload
+
+export interface HitlInterruptEvent {
+  type: "hitl_interrupt"
+  thread_id: string
+  interrupt_payload: InterruptPayload
+}
+
+export type SSEEvent =
+  | TokenEvent
+  | NodeStartEvent
+  | NodeCompleteEvent
+  | HitlInterruptEvent
+  | CompleteEvent
+  | ErrorEvent
+
 export interface AgentStateSnapshot {
   status: string
   investigation: Investigation
   proposal: ResolutionProposal
   investigation_attempts: number
+  execution_attempts: number
   execution_result: string
   escalation_reason: string
+  additional_context: Record<string, string>
+  failure_context: FailureContext
+  manual_takeover_note: string
 }
 
 export interface ThreadStageResponse {
@@ -153,9 +193,12 @@ export interface ThreadDetailResponse {
   trade_id: string
   status: AgentStatus | "running"
   current_node: string | null
+  intervention_kind: InterventionKind | null
   interrupt_payload: InterruptPayload | null
   final_state: Partial<AgentStateSnapshot> | null
   error: string | null
+  failure_context: FailureContext | null
+  manual_takeover_note: string | null
   paused_at: string | null
   stage_history: ThreadStageResponse[]
 }
@@ -167,14 +210,13 @@ export interface ThreadSession {
   currentNode: string | null
   currentStageId: string | null
   stageHistory: ThreadStageRecord[]
+  interventionKind: InterventionKind | null
   interruptPayload: InterruptPayload | null
   finalState: Partial<AgentStateSnapshot> | null
   error: string | null
+  failureContext: FailureContext | null
+  manualTakeoverNote: string | null
 }
-
-// ── Human decision ─────────────────────────────────────────────────────────────
-
-export type DecisionAction = "approve" | "reject" | "modify" | "escalate"
 
 export interface HumanDecision {
   action: DecisionAction
@@ -183,9 +225,8 @@ export interface HumanDecision {
   reason?: string | null
   confidence_before?: number | null
   escalation_category?: string | null
+  context_fields?: Record<string, string> | null
 }
-
-// ── Queue items and inspector payloads ────────────────────────────────────────
 
 export interface QueueItem {
   thread_id: string | null
@@ -196,6 +237,7 @@ export interface QueueItem {
   amount: number | null
   counterparty: string | null
   proposal_action: string | null
+  intervention_kind: InterventionKind | null
   interrupt_payload: InterruptPayload | null
   paused_at: string | null
 }
@@ -212,6 +254,7 @@ export interface AuditEntryResponse {
   confidence_before: number | null
   agent_proposal_before: string | null
   escalation_category: string | null
+  context_fields: Record<string, string> | null
 }
 
 export interface AuditLogResponse {

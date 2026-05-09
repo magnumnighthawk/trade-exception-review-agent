@@ -2,20 +2,11 @@
 Human decision endpoint — resumes a paused agent.
 
 LEARNING: This endpoint is the second half of the HITL contract.
-When the frontend's DecisionSurface submits a decision:
+When the frontend submits an intervention:
   1. This endpoint receives the HumanDecisionRequest
-  2. It calls graph.invoke(Command(resume=...)) with the thread_id
-  3. The checkpointed agent resumes from where interrupt() paused it
-  4. The frontend then connects to /stream/resume to see what happens next
-
-Notice the separation: the decision endpoint does NOT stream.
-It submits the decision and returns immediately with a status acknowledgement.
-Streaming is always a separate concern (stream.py).
-
-HITL: This endpoint is the human's "write" action. Every call here is
-logged in the agent's audit trail via the human_decision state field.
-
-Phase 4: Enhanced to log decisions to audit_store for compliance.
+  2. It validates the action against the current intervention kind
+  3. It calls graph.invoke(Command(resume=...)) with the thread_id
+  4. The checkpointed agent resumes from where interrupt() paused it
 """
 
 import logging
@@ -25,31 +16,68 @@ from fastapi import APIRouter, HTTPException
 from langgraph.types import Command
 
 from backend.agent.graph import graph
-from backend.api.models import HumanDecisionRequest, DecisionResponse
-from backend.api.state_store import state_store
+from backend.agent.policy import approval_locked
 from backend.api.audit_store import audit_store
+from backend.api.models import DecisionResponse, HumanDecisionRequest
+from backend.api.state_store import state_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/review", tags=["review"])
 
 
+def _validate_decision(kind: str | None, req: HumanDecisionRequest, interrupt_payload: dict) -> None:
+    allowed_actions = {
+        "proposal_review": {"approve", "reject", "modify", "escalate"},
+        "information_request": {"provide_context", "escalate"},
+        "failure_recovery": {"retry", "manual_takeover", "escalate"},
+    }
+
+    if kind not in allowed_actions:
+        raise HTTPException(status_code=409, detail=f"Unsupported intervention kind: {kind}")
+
+    if req.action not in allowed_actions[kind]:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Action '{req.action}' is not valid for intervention kind '{kind}'",
+        )
+
+    if kind == "proposal_review" and req.action == "approve":
+        confidence = interrupt_payload.get("confidence", 1.0)
+        if approval_locked(confidence):
+            raise HTTPException(
+                status_code=409,
+                detail="Approval is policy-locked below the low-confidence threshold.",
+            )
+
+    if kind == "proposal_review" and req.action in {"modify", "reject"} and not req.modification:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Action '{req.action}' requires guidance in the modification field.",
+        )
+
+    if kind == "information_request" and req.action == "provide_context" and not req.context_fields:
+        raise HTTPException(
+            status_code=422,
+            detail="Providing context requires at least one context field.",
+        )
+
+    if kind == "failure_recovery" and req.action == "retry" and not interrupt_payload.get("retry_available", False):
+        raise HTTPException(
+            status_code=409,
+            detail="Retry is no longer available for this recovery path.",
+        )
+
+    if kind == "failure_recovery" and req.action == "manual_takeover" and not (req.reason or req.modification):
+        raise HTTPException(
+            status_code=422,
+            detail="Manual takeover requires an operator note explaining the handoff.",
+        )
+
+
 @router.post("/{thread_id}/decision", response_model=DecisionResponse)
 async def submit_decision(thread_id: str, req: HumanDecisionRequest):
-    """
-    Submit a human decision for a paused agent thread.
+    """Submit a human intervention for a paused agent thread."""
 
-    LEARNING: graph.invoke(Command(resume=value), config=config) is the
-    LangGraph API for resuming an interrupted graph. The `value` here becomes
-    the return value of interrupt() inside propose_resolution_node.
-
-    The graph runs synchronously from the resume point until it either:
-    - Completes (returns final state)
-    - Hits another interrupt() (another HITL cycle, e.g. after reject+reinvestigate)
-    - Errors
-
-    We handle all three outcomes and update state_store accordingly.
-    Phase 4: Also log the decision to the immutable audit trail.
-    """
     entry = state_store.get(thread_id)
     if not entry:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
@@ -57,26 +85,34 @@ async def submit_decision(thread_id: str, req: HumanDecisionRequest):
     if entry["status"] != "waiting_human":
         raise HTTPException(
             status_code=409,
-            detail=f"Thread {thread_id} is not waiting for human input (status: {entry['status']})"
+            detail=f"Thread {thread_id} is not waiting for human input (status: {entry['status']})",
         )
 
     config = {"configurable": {"thread_id": thread_id}}
+    interrupt_payload = entry.get("interrupt_payload") or {}
+    intervention_kind = interrupt_payload.get("kind")
+    _validate_decision(intervention_kind, req, interrupt_payload)
 
-    # Build the decision payload — this is what interrupt() returns in the agent
     decision_payload = {
         "action": req.action,
         "modification": req.modification,
         "operator_id": req.operator_id,
         "decided_at": datetime.now(timezone.utc).isoformat(),
+        "reason": req.reason,
+        "confidence_before": req.confidence_before,
+        "escalation_category": req.escalation_category,
+        "context_fields": req.context_fields,
     }
 
-    logger.info(f"[decision] Thread {thread_id}: operator {req.operator_id} → {req.action}")
+    logger.info(
+        "[decision] Thread %s: operator %s → %s (%s)",
+        thread_id,
+        req.operator_id,
+        req.action,
+        intervention_kind,
+    )
 
-    # Phase 4: Log decision to audit trail BEFORE resuming
-    # This ensures we record the decision even if the agent crashes
-    interrupt_payload = entry.get("interrupt_payload") or {}
-    proposal = interrupt_payload.get("proposal") or {}
-    
+    proposal = interrupt_payload.get("proposal") or interrupt_payload.get("latest_proposal") or {}
     audit_store.log_decision(
         thread_id=thread_id,
         trade_id=entry["trade_id"],
@@ -87,20 +123,17 @@ async def submit_decision(thread_id: str, req: HumanDecisionRequest):
         confidence_before=req.confidence_before or interrupt_payload.get("confidence"),
         agent_proposal_before=proposal.get("action"),
         escalation_category=req.escalation_category,
+        context_fields=req.context_fields,
     )
 
-    # Mark as resuming before invoking so the queue shows the right status
     state_store.set_resuming(thread_id)
 
     try:
-        # HITL: Resume the checkpointed agent with the human's decision.
-        # This is a synchronous call — it runs until the next interrupt or terminal state.
         result = graph.invoke(
             Command(resume=decision_payload),
             config=config,
         )
 
-        # Check if we hit another interrupt (reject loop)
         snapshot = graph.get_state(config)
         interrupt_payload = None
         tasks = getattr(snapshot, "tasks", None) or []
@@ -111,12 +144,12 @@ async def submit_decision(thread_id: str, req: HumanDecisionRequest):
                 break
 
         if interrupt_payload:
-            # Another HITL cycle — agent re-investigated and has a new proposal
             state_store.set_interrupt(thread_id, interrupt_payload)
             new_status = "waiting_human"
         else:
-            new_status = result.get("status", "complete") if result else "complete"
-            state_store.set_final(thread_id, new_status)
+            result = result or {}
+            new_status = result.get("status", "complete")
+            state_store.set_final(thread_id, new_status, result)
 
         return DecisionResponse(
             thread_id=thread_id,
@@ -125,7 +158,7 @@ async def submit_decision(thread_id: str, req: HumanDecisionRequest):
             message=f"Decision '{req.action}' processed. Agent status: {new_status}",
         )
 
-    except Exception as e:
-        logger.error(f"[decision] Error resuming thread {thread_id}: {e}")
-        state_store.set_error(thread_id, str(e))
-        raise HTTPException(status_code=500, detail=f"Error processing decision: {str(e)}")
+    except Exception as error:
+        logger.error("[decision] Error resuming thread %s: %s", thread_id, error)
+        state_store.set_error(thread_id, str(error))
+        raise HTTPException(status_code=500, detail=f"Error processing decision: {str(error)}")

@@ -40,11 +40,14 @@ class AgentStateStore:
                 "operator_id": operator_id,
                 "status": "running",
                 "current_node": None,
+                "intervention_kind": None,
                 "interrupt_payload": None,
                 "paused_at": None,
                 "stage_history": [],
                 "final_state": None,
                 "error": None,
+                "failure_context": None,
+                "manual_takeover_note": None,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
 
@@ -148,6 +151,7 @@ class AgentStateStore:
         with self._lock:
             if thread_id in self._store:
                 self._store[thread_id]["status"] = "waiting_human"
+                self._store[thread_id]["intervention_kind"] = interrupt_payload.get("kind")
                 self._store[thread_id]["interrupt_payload"] = interrupt_payload
                 self._store[thread_id]["paused_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -155,6 +159,7 @@ class AgentStateStore:
         with self._lock:
             if thread_id in self._store:
                 self._store[thread_id]["status"] = "resuming"
+                self._store[thread_id]["intervention_kind"] = None
                 self._store[thread_id]["interrupt_payload"] = None
                 self._store[thread_id]["current_node"] = None
 
@@ -164,13 +169,27 @@ class AgentStateStore:
                 self._store[thread_id]["status"] = status
                 self._store[thread_id]["final_state"] = final_state
                 self._store[thread_id]["current_node"] = None
+                self._store[thread_id]["intervention_kind"] = None
+                self._store[thread_id]["interrupt_payload"] = None
+                self._store[thread_id]["failure_context"] = (final_state or {}).get("failure_context")
+                self._store[thread_id]["manual_takeover_note"] = (final_state or {}).get("manual_takeover_note")
 
     def set_error(self, thread_id: str, error: str):
         with self._lock:
             if thread_id in self._store:
+                failed_node = self._store[thread_id].get("current_node") or "unknown"
                 self._store[thread_id]["status"] = "error"
                 self._store[thread_id]["error"] = error
                 self._store[thread_id]["current_node"] = None
+                self._store[thread_id]["intervention_kind"] = None
+                self._store[thread_id]["failure_context"] = {
+                    "category": "execution_error",
+                    "failed_node": failed_node,
+                    "message": error,
+                    "recoverable": False,
+                    "retry_available": False,
+                    "retry_count": 0,
+                }
 
                 history = self._store[thread_id].get("stage_history") or []
                 if history and history[-1].get("status") == "running":

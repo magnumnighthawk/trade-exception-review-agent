@@ -10,7 +10,23 @@ touching any node or graph code. If the state is well-designed, everything
 else falls into place.
 """
 
-from typing import Optional, Literal, TypedDict
+from typing import Optional, Literal, TypedDict, NotRequired
+
+
+class Phase5Scenario(TypedDict, total=False):
+    """
+    Deterministic learning scenarios used by fixtures and validation scripts.
+
+    LEARNING: We keep these hooks data-driven so Phase 5 paths can be exercised
+    predictably without relying on the LLM to "happen" to fail in the right way.
+    """
+
+    requires_information_request: bool
+    information_request_question: str
+    information_request_fields: list[str]
+    force_low_confidence_proposal: float
+    simulate_recoverable_execution_failure: bool
+    recoverable_failure_message: str
 
 
 class TradeException(TypedDict):
@@ -21,12 +37,14 @@ class TradeException(TypedDict):
     (e.g. DTCC, Euroclear). Here we define it explicitly so the agent
     has a typed contract on what it can expect to receive.
     """
+
     trade_id: str
     type: Literal["settlement_fail", "iban_mismatch", "amount_discrepancy", "counterparty_mismatch"]
-    amount: float               # USD value of the trade
-    counterparty: str           # The other side of the trade
-    reason: str                 # Human-readable description of why it was flagged
-    flagged_at: str             # ISO 8601 timestamp
+    amount: float
+    counterparty: str
+    reason: str
+    flagged_at: str
+    scenario: NotRequired[Phase5Scenario]
 
 
 class InvestigationResult(TypedDict):
@@ -37,10 +55,11 @@ class InvestigationResult(TypedDict):
     state readable. You could flatten everything into TradeExceptionState,
     but nested types document intent better.
     """
-    root_cause: str             # What the agent determined caused the exception
-    evidence: list[str]         # Specific facts gathered during investigation
-    suggested_action: str       # Initial suggested fix (not the final proposal)
-    confidence: float           # 0.0–1.0 — how sure the agent is of its finding
+
+    root_cause: str
+    evidence: list[str]
+    suggested_action: str
+    confidence: float
 
 
 class ResolutionProposal(TypedDict):
@@ -50,26 +69,64 @@ class ResolutionProposal(TypedDict):
     LEARNING: This is what gets shown in the UI's DecisionSurface.
     Every field here maps to something the human sees and can act on.
     """
-    action: str                 # e.g. "Update IBAN and retry settlement"
-    details: str                # Step-by-step breakdown of what will happen
-    confidence: float           # Confidence in this specific resolution
-    requires_human_approval: bool   # Derived from confidence + amount threshold
+
+    action: str
+    details: str
+    confidence: float
+    requires_human_approval: bool
     risk_level: Literal["low", "medium", "high", "critical"]
+
+
+class ReviewPolicy(TypedDict):
+    """Policy thresholds surfaced to the supervision UI."""
+
+    low_confidence_threshold: float
+    high_confidence_threshold: float
+    max_investigation_attempts: int
+    max_execution_retries: int
 
 
 class HumanDecision(TypedDict):
     """
-    The decision returned by the human operator after reviewing the proposal.
+    The decision returned by the human operator after reviewing an intervention.
 
-    LEARNING: This is the output of the HITL interrupt. The agent
-    receives exactly this shape back when execution resumes.
-    Notice we include `modification` — this is the steering pattern.
-    The human doesn't just say yes/no; they can change what happens next.
+    LEARNING: Phase 5 broadens human input beyond proposal review. The same
+    interrupt/resume contract now supports proposal review, information supply,
+    and recovery/manual takeover decisions.
     """
-    action: Literal["approve", "reject", "modify", "escalate"]
-    modification: Optional[str]     # Only set if action == "modify"
-    operator_id: str                # PRODUCTION: who made this decision
-    decided_at: str                 # ISO 8601 timestamp — audit trail
+
+    action: Literal[
+        "approve",
+        "reject",
+        "modify",
+        "escalate",
+        "provide_context",
+        "retry",
+        "manual_takeover",
+    ]
+    operator_id: str
+    decided_at: str
+    modification: NotRequired[Optional[str]]
+    reason: NotRequired[Optional[str]]
+    confidence_before: NotRequired[Optional[float]]
+    escalation_category: NotRequired[Optional[str]]
+    context_fields: NotRequired[Optional[dict[str, str]]]
+
+
+class FailureContext(TypedDict):
+    """
+    Structured explanation of why the agent stopped or handed off.
+
+    PRODUCTION: This is the kernel of the failure record you'd persist to your
+    incident / ops database so humans know whether the agent is safe to retry.
+    """
+
+    category: Literal["insufficient_information", "retry_limit", "execution_error", "manual_takeover"]
+    failed_node: str
+    message: str
+    recoverable: bool
+    retry_available: bool
+    retry_count: int
 
 
 class AuditEntry(TypedDict):
@@ -80,8 +137,9 @@ class AuditEntry(TypedDict):
     append-only store (e.g. Postgres with no UPDATE permissions for the
     agent service account). This is non-negotiable in regulated environments.
     """
+
     timestamp: str
-    event_type: str             # "node_entered", "hitl_interrupt", "decision_received", etc.
+    event_type: str
     node: Optional[str]
     details: str
 
@@ -98,39 +156,45 @@ class TradeExceptionState(TypedDict):
     TRADE-OFF: We could split this into separate state objects per phase
     (investigation state, proposal state, etc.) using LangGraph's
     Send/subgraph patterns. We use a flat structure here to keep the
-    learning curve manageable in Phase 1. In production, you'd likely
-    split after the complexity grows.
+    learning curve manageable. In production, you'd likely split after
+    the complexity grows.
     """
 
     # ── Input ─────────────────────────────────────────────────────────────────
-    exception: TradeException           # The flagged trade — set once, never mutated
+    exception: TradeException
 
     # ── Investigation phase ───────────────────────────────────────────────────
-    investigation: Optional[InvestigationResult]    # Set by investigate_node
-    investigation_attempts: int                     # Track retries (starts at 0)
+    investigation: Optional[InvestigationResult]
+    investigation_attempts: int
+    additional_context: Optional[dict[str, str]]
 
     # ── Proposal phase ────────────────────────────────────────────────────────
-    proposal: Optional[ResolutionProposal]          # Set by propose_resolution_node
+    proposal: Optional[ResolutionProposal]
 
     # ── HITL phase ────────────────────────────────────────────────────────────
-    # HITL: This field is written by the human via the decision endpoint
-    # and read by every downstream node to determine what happens next.
+    # HITL: This field stores the proposal-review decision that governs the
+    # main execution branch. Information-request and recovery decisions are
+    # handled locally in their nodes but still audited separately.
     human_decision: Optional[HumanDecision]
 
-    # ── Execution phase ───────────────────────────────────────────────────────
-    execution_result: Optional[str]     # Confirmation / error message from execution
-    escalation_reason: Optional[str]    # Set when escalated — explains why
+    # ── Execution / recovery phase ────────────────────────────────────────────
+    execution_result: Optional[str]
+    execution_attempts: int
+    escalation_reason: Optional[str]
+    failure_context: Optional[FailureContext]
+    manual_takeover_note: Optional[str]
 
     # ── Metadata ──────────────────────────────────────────────────────────────
-    thread_id: str                      # LangGraph thread — the reconnection key
+    thread_id: str
     status: Literal[
-        "received",         # Exception received, not yet investigated
-        "investigating",    # investigate_node is running
-        "awaiting_human",   # Proposal ready, waiting for human decision
-        "executing",        # execute_resolution_node is running
-        "complete",         # Happy path end state
-        "rejected",         # Human rejected — may trigger re-investigation
-        "escalated",        # Human escalated — out of this agent's hands
-        "error",            # Something went wrong
+        "received",
+        "investigating",
+        "awaiting_human",
+        "executing",
+        "complete",
+        "rejected",
+        "escalated",
+        "manual_takeover",
+        "error",
     ]
-    audit_log: list[AuditEntry]         # Full immutable record of this run
+    audit_log: list[AuditEntry]

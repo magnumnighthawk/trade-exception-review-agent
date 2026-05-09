@@ -5,120 +5,164 @@ LEARNING: Keeping API models in one file enforces a clean boundary between
 your agent's internal TypedDict state and what the HTTP layer exposes.
 Never expose your raw LangGraph state over the wire — the API contract
 should be stable even as the internal state schema evolves.
-
-Two categories:
-- Request models: what the frontend sends IN
-- Response models: what the backend sends OUT (including SSE event shapes)
 """
 
-from typing import Optional, Literal
+from typing import Literal, Optional
+
 from pydantic import BaseModel, Field
+
+
+DecisionAction = Literal[
+    "approve",
+    "reject",
+    "modify",
+    "escalate",
+    "provide_context",
+    "retry",
+    "manual_takeover",
+]
+
+InterventionKind = Literal["proposal_review", "information_request", "failure_recovery"]
 
 
 # ── Request models ─────────────────────────────────────────────────────────────
 
 class StartReviewRequest(BaseModel):
-    """
-    POST /review/start — kick off a new agent run for a trade exception.
-    """
+    """POST /review/start — kick off a new agent run for a trade exception."""
+
     trade_id: str = Field(..., description="Trade ID to review, e.g. TRD-9821")
     operator_id: str = Field(default="operator_001", description="ID of the reviewing operator")
 
 
 class HumanDecisionRequest(BaseModel):
     """
-    POST /review/{thread_id}/decision — submit a human decision to resume
+    POST /review/{thread_id}/decision — submit a human intervention to resume
     the paused agent.
 
-    LEARNING: This is the resume payload. The shape here must match exactly
-    what propose_resolution_node expects back from interrupt().
-    If you change this shape you must also update the interrupt() call in nodes.py.
-
-    HITL: This is the contract between the UI's DecisionSurface and the backend.
-    Phase 4: Extended with audit fields (reason, confidence_before) for logging.
+    LEARNING: Phase 5 broadens this contract beyond proposal review so the
+    same endpoint can resume information requests and recovery workflows.
     """
-    action: Literal["approve", "reject", "modify", "escalate"]
+
+    action: DecisionAction
     modification: Optional[str] = Field(
         default=None,
-        description="Required when action is 'modify', optional context for 'reject'"
+        description="Freeform steering / rejection / manual-takeover note",
     )
     operator_id: str = Field(..., description="ID of the operator making this decision")
     reason: Optional[str] = Field(default=None, description="Why the operator made this decision")
     confidence_before: Optional[float] = Field(default=None, description="Agent confidence before decision")
-    escalation_category: Optional[str] = Field(default=None, description="Where to escalate (if action='escalate')")
+    escalation_category: Optional[str] = Field(default=None, description="Where to escalate the case")
+    context_fields: Optional[dict[str, str]] = Field(
+        default=None,
+        description="Structured source-of-truth fields supplied during an information request",
+    )
+
+
+# ── Shared payload models ──────────────────────────────────────────────────────
+
+class ReviewPolicyPayload(BaseModel):
+    low_confidence_threshold: float
+    high_confidence_threshold: float
+    max_investigation_attempts: int
+    max_execution_retries: int
+
+
+class ProposalPayload(BaseModel):
+    action: str
+    details: str
+    confidence: float
+    requires_human_approval: bool
+    risk_level: Literal["low", "medium", "high", "critical"]
+
+
+class ProposalReviewInterruptPayload(BaseModel):
+    kind: Literal["proposal_review"] = "proposal_review"
+    trade_id: str
+    proposal: ProposalPayload
+    investigation_summary: str
+    confidence: float
+    risk_level: Literal["low", "medium", "high", "critical"]
+    amount: float
+    policy: ReviewPolicyPayload
+
+
+class InformationRequestInterruptPayload(BaseModel):
+    kind: Literal["information_request"] = "information_request"
+    trade_id: str
+    question: str
+    fields_needed: list[str]
+    attempt: int
+    context_summary: str
+    policy: ReviewPolicyPayload
+
+
+class FailureRecoveryInterruptPayload(BaseModel):
+    kind: Literal["failure_recovery"] = "failure_recovery"
+    trade_id: str
+    failed_node: str
+    error_message: str
+    recoverable: bool
+    retry_available: bool
+    retry_count: int
+    latest_proposal: Optional[ProposalPayload] = None
+    policy: ReviewPolicyPayload
+
+
+InterruptPayload = (
+    ProposalReviewInterruptPayload | InformationRequestInterruptPayload | FailureRecoveryInterruptPayload
+)
 
 
 # ── SSE event models ───────────────────────────────────────────────────────────
-# LEARNING: SSE events are just JSON strings sent over a text/event-stream response.
-# We define their shapes here so both the backend (sender) and frontend (receiver)
-# agree on the contract. The 'type' field acts as a discriminator — your frontend
-# switch statement will branch on this.
 
 class SSEEvent(BaseModel):
     """Base SSE event — every event has a type discriminator."""
+
     type: str
 
 
 class TokenEvent(SSEEvent):
-    """
-    Emitted for each LLM token as it streams.
-    LEARNING: This is the lowest-level streaming event. The frontend accumulates
-    these into a string to show the agent "thinking" in real time.
-    """
     type: Literal["token"] = "token"
     content: str
-    node: str       # Which node is currently streaming
+    node: str
 
 
 class NodeStartEvent(SSEEvent):
-    """
-    Emitted when a node begins executing.
-    LEARNING: Use this to update a "current step" indicator in the UI.
-    """
     type: Literal["node_start"] = "node_start"
     node: str
-    message: str    # Human-readable description of what this node does
+    message: str
 
 
 class NodeCompleteEvent(SSEEvent):
-    """
-    Emitted when a node finishes executing.
-    """
     type: Literal["node_complete"] = "node_complete"
     node: str
-    state_snapshot: Optional[dict] = None   # Partial state for the UI to display
+    state_snapshot: Optional[dict] = None
 
 
 class HitlInterruptEvent(SSEEvent):
     """
-    Emitted when the agent hits interrupt() and is waiting for human input.
+    Emitted when the agent pauses for human intervention.
 
-    HITL: This is the most important SSE event. When the frontend receives this,
-    it MUST change status to "waiting_human" and render the DecisionSurface.
-    The interrupt_payload contains everything the human needs to make a decision.
+    HITL: The `kind` inside interrupt_payload tells the frontend which
+    intervention surface to render.
     """
+
     type: Literal["hitl_interrupt"] = "hitl_interrupt"
     thread_id: str
-    interrupt_payload: dict     # The dict passed to interrupt() in propose_resolution_node
+    interrupt_payload: InterruptPayload
 
 
 class CompleteEvent(SSEEvent):
-    """
-    Emitted when the agent finishes (complete, escalated, or error).
-    """
     type: Literal["complete"] = "complete"
     status: str
     final_state: dict
 
 
 class ErrorEvent(SSEEvent):
-    """
-    Emitted when the agent encounters an unrecoverable error.
-    PRODUCTION: This should trigger an alert and surface a manual resolution path.
-    """
     type: Literal["error"] = "error"
     message: str
     recoverable: bool = False
+    failure_context: Optional[dict] = None
 
 
 # ── Response models ────────────────────────────────────────────────────────────
@@ -132,18 +176,18 @@ class StartReviewResponse(BaseModel):
 class DecisionResponse(BaseModel):
     thread_id: str
     action: str
-    status: str     # The new agent status after the decision was processed
+    status: str
     message: str
 
 
 class QueueItem(BaseModel):
     """
-    One entry in the paused-agents queue.
+    One entry in the supervision queue.
 
-    LEARNING: This is what Panel 1 (ExceptionQueue) in the supervision UI
-    renders for each paused agent. Sort by risk_level + confidence to give
-    operators the most urgent cases first.
+    LEARNING: Phase 5 keeps status lightweight, but adds `intervention_kind`
+    so operators can distinguish review, information, and recovery stops.
     """
+
     thread_id: Optional[str] = None
     trade_id: str
     status: str
@@ -152,7 +196,8 @@ class QueueItem(BaseModel):
     amount: Optional[float] = None
     counterparty: Optional[str] = None
     proposal_action: Optional[str] = None
-    interrupt_payload: Optional[dict] = None    # Full payload for DecisionSurface
+    intervention_kind: Optional[InterventionKind] = None
+    interrupt_payload: Optional[InterruptPayload] = None
     paused_at: Optional[str] = None
 
 
@@ -162,13 +207,6 @@ class QueueResponse(BaseModel):
 
 
 class ThreadStageResponse(BaseModel):
-    """
-    One persisted stage in the agent's execution history.
-
-    LEARNING: This is the UI-safe summary of one node execution. We persist
-    both the streaming transcript and the node_complete snapshot so operators
-    can reconstruct the reasoning path even after a page refresh.
-    """
     stage_id: str
     node: str
     message: str
@@ -181,32 +219,21 @@ class ThreadStageResponse(BaseModel):
 
 
 class ThreadDetailResponse(BaseModel):
-    """
-    Full detail payload for one supervised thread.
-
-    LEARNING: The queue list stays lightweight, while this response gives the
-    selected thread enough history to power operator investigation tools such
-    as stage-by-stage review, checkpoint inspection, and contextual summaries.
-    """
     thread_id: str
     trade_id: str
     status: str
     current_node: Optional[str] = None
-    interrupt_payload: Optional[dict] = None
+    intervention_kind: Optional[InterventionKind] = None
+    interrupt_payload: Optional[InterruptPayload] = None
     final_state: Optional[dict] = None
     error: Optional[str] = None
+    failure_context: Optional[dict] = None
+    manual_takeover_note: Optional[str] = None
     paused_at: Optional[str] = None
     stage_history: list[ThreadStageResponse] = Field(default_factory=list)
 
 
 class CheckpointStateResponse(BaseModel):
-    """
-    Lightweight checkpoint inspection payload.
-
-    LEARNING: This response exposes a safe subset of LangGraph checkpoint
-    internals so operators (and learners) can see whether a thread is paused,
-    what node it was on, and which state keys currently exist.
-    """
     thread_id: str
     has_checkpoint: bool
     has_interrupt: bool
@@ -217,37 +244,24 @@ class CheckpointStateResponse(BaseModel):
     checkpointer_backend: str
 
 
-# ── Audit trail models (Phase 4) ───────────────────────────────────────────
+# ── Audit trail models ────────────────────────────────────────────────────────
 
 class AuditEntryResponse(BaseModel):
-    """
-    One immutable decision log entry.
-
-    HITL: Every decision by a human is logged here. In production, this would
-    be in an append-only database (Postgres with no UPDATE/DELETE).
-    Regulators and compliance teams review this to audit the agent's governance.
-    """
     audit_entry_id: str
     timestamp: str
     operator_id: str
     thread_id: str
     trade_id: str
-    decision: Literal["approve", "reject", "modify", "escalate"]
+    decision: DecisionAction
     modification: Optional[str] = None
     reason: Optional[str] = None
     confidence_before: Optional[float] = None
     agent_proposal_before: Optional[str] = None
     escalation_category: Optional[str] = None
+    context_fields: Optional[dict[str, str]] = None
 
 
 class AuditLogResponse(BaseModel):
-    """
-    Audit history for one thread.
-
-    LEARNING: When an operator clicks into a thread, they see this history
-    so they know: what was investigated, what did the agent propose, what did
-    the previous operator(s) decide? This is full traceability.
-    """
     thread_id: str
     trade_id: str
     audit_entries: list[AuditEntryResponse]
@@ -255,23 +269,18 @@ class AuditLogResponse(BaseModel):
 
 
 class SubmitDecisionRequest(BaseModel):
-    """
-    Request body for POST /queue/audit — log a decision after submission.
-    This is separate from HumanDecisionRequest because we may want different
-    field validation for the decision flow vs. the audit endpoint.
-    """
     thread_id: str
     operator_id: str
-    decision: Literal["approve", "reject", "modify", "escalate"]
+    decision: DecisionAction
     modification: Optional[str] = None
     reason: Optional[str] = None
     confidence_before: Optional[float] = None
     agent_proposal_before: Optional[str] = None
     escalation_category: Optional[str] = None
+    context_fields: Optional[dict[str, str]] = None
 
 
 class SubmitDecisionResponse(BaseModel):
-    """Response after logging a decision."""
     audit_entry_id: str
     timestamp: str
     message: str = "Decision logged"

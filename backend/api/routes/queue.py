@@ -57,7 +57,8 @@ async def get_queue():
         "idle": 3,
         "complete": 4,
         "escalated": 5,
-        "error": 6,
+        "manual_takeover": 6,
+        "error": 7,
     }
 
     entries = state_store.all()
@@ -86,6 +87,7 @@ async def get_queue():
             amount=payload.get("amount") or _get_amount(entry["trade_id"]),
             counterparty=_get_counterparty(entry["trade_id"]),
             proposal_action=proposal.get("action"),
+            intervention_kind=payload.get("kind"),
             interrupt_payload=payload if entry["status"] == "waiting_human" else None,
             paused_at=entry.get("paused_at"),
         ))
@@ -104,6 +106,7 @@ async def get_queue():
             amount=exception.get("amount"),
             counterparty=exception.get("counterparty"),
             proposal_action=None,
+            intervention_kind=None,
             interrupt_payload=None,
             paused_at=None,
         ))
@@ -147,9 +150,12 @@ async def get_thread_status(thread_id: str):
         trade_id=entry["trade_id"],
         status=entry["status"],
         current_node=entry.get("current_node"),
+        intervention_kind=entry.get("intervention_kind"),
         interrupt_payload=entry.get("interrupt_payload"),
         final_state=entry.get("final_state"),
         error=entry.get("error"),
+        failure_context=entry.get("failure_context"),
+        manual_takeover_note=entry.get("manual_takeover_note"),
         paused_at=entry.get("paused_at"),
         stage_history=[
             ThreadStageResponse(
@@ -218,6 +224,7 @@ async def get_audit_log(thread_id: str, limit: int = 50):
             confidence_before=e.confidence_before,
             agent_proposal_before=e.agent_proposal_before,
             escalation_category=e.escalation_category,
+            context_fields=e.context_fields,
         )
         for e in audit_entries
     ]
@@ -259,6 +266,7 @@ async def submit_audit_entry(req: SubmitDecisionRequest):
         confidence_before=req.confidence_before,
         agent_proposal_before=req.agent_proposal_before,
         escalation_category=req.escalation_category,
+        context_fields=req.context_fields,
     )
 
     logger.info(
@@ -302,6 +310,7 @@ async def get_audit_history_for_trade(trade_id: str, limit: int = 100):
             confidence_before=e.confidence_before,
             agent_proposal_before=e.agent_proposal_before,
             escalation_category=e.escalation_category,
+            context_fields=e.context_fields,
         )
         for e in audit_entries
     ]

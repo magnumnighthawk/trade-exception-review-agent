@@ -61,6 +61,7 @@ export const STATUS_PILL_CLASSES: Record<string, string> = {
   resuming: "border-[var(--accent-soft)] bg-[var(--accent-soft)] text-accent",
   complete: "border-[var(--success-border)] bg-[var(--success-soft)] text-[var(--success-ink)]",
   escalated: "border-[var(--alert-border)] bg-[var(--alert-soft)] text-[var(--alert-ink)]",
+  manual_takeover: "border-[var(--alert-border)] bg-[var(--alert-soft)] text-[var(--alert-ink)]",
   error: "border-[var(--critical-border)] bg-[var(--critical-soft)] text-[var(--critical-ink)]",
 }
 
@@ -73,6 +74,7 @@ export const STATUS_TEXT_CLASSES: Record<string, string> = {
   resuming: "text-accent",
   complete: "text-[var(--success-ink)]",
   escalated: "text-[var(--alert-ink)]",
+  manual_takeover: "text-[var(--alert-ink)]",
   error: "text-[var(--critical-ink)]",
 }
 

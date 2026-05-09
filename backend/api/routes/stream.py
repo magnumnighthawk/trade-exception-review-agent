@@ -239,6 +239,16 @@ async def stream_review(thread_id: str):
         initial_state = {
             "exception": exception,
             "thread_id": thread_id,
+            "investigation": None,
+            "investigation_attempts": 0,
+            "additional_context": None,
+            "proposal": None,
+            "human_decision": None,
+            "execution_result": None,
+            "execution_attempts": 0,
+            "escalation_reason": None,
+            "failure_context": None,
+            "manual_takeover_note": None,
             "audit_log": [],
         }
 
@@ -281,7 +291,15 @@ async def stream_review(thread_id: str):
                     # Only send safe, serialisable subset of state to UI
                     snapshot = {
                         k: v for k, v in (output or {}).items()
-                        if k in ("status", "investigation", "proposal", "investigation_attempts")
+                        if k
+                        in (
+                            "status",
+                            "investigation",
+                            "proposal",
+                            "investigation_attempts",
+                            "failure_context",
+                            "manual_takeover_note",
+                        )
                     }
                     state_store.complete_stage(thread_id, name, snapshot)
                     yield _sse(NodeCompleteEvent(
@@ -308,7 +326,13 @@ async def stream_review(thread_id: str):
             else:
                 logger.error(f"[stream] Error in thread {thread_id}: {e}")
                 state_store.set_error(thread_id, str(e))
-                yield _sse(ErrorEvent(message=str(e)).model_dump())
+                yield _sse(
+                    ErrorEvent(
+                        message=str(e),
+                        recoverable=False,
+                        failure_context=state_store.get(thread_id).get("failure_context"),
+                    ).model_dump()
+                )
                 terminal_event_emitted = True
 
         if not terminal_event_emitted:
@@ -401,7 +425,17 @@ async def stream_resume(thread_id: str):
                     output = event.get("data", {}).get("output", {})
                     snapshot = {
                         k: v for k, v in (output or {}).items()
-                        if k in ("status", "investigation", "proposal", "execution_result", "escalation_reason")
+                        if k
+                        in (
+                            "status",
+                            "investigation",
+                            "proposal",
+                            "execution_result",
+                            "execution_attempts",
+                            "escalation_reason",
+                            "failure_context",
+                            "manual_takeover_note",
+                        )
                     }
                     state_store.complete_stage(thread_id, name, snapshot)
                     yield _sse(NodeCompleteEvent(
@@ -449,7 +483,13 @@ async def stream_resume(thread_id: str):
             else:
                 logger.error(f"[stream/resume] Error in thread {thread_id}: {e}")
                 state_store.set_error(thread_id, str(e))
-                yield _sse(ErrorEvent(message=str(e)).model_dump())
+                yield _sse(
+                    ErrorEvent(
+                        message=str(e),
+                        recoverable=False,
+                        failure_context=state_store.get(thread_id).get("failure_context"),
+                    ).model_dump()
+                )
                 terminal_event_emitted = True
 
         if not terminal_event_emitted:

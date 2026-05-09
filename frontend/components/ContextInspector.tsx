@@ -21,6 +21,7 @@ const STATUS_LABELS: Record<string, string> = {
   resuming: "Resuming",
   complete: "Resolved",
   escalated: "Escalated",
+  manual_takeover: "Manual resolution",
   error: "Needs intervention",
 }
 
@@ -57,6 +58,15 @@ export function ContextInspector({ selectedItem, selectedSession }: Props) {
     }
     if (selectedItem.status === "error") {
       return "The run failed and needs intervention. Use this inspector to review the checkpoint and audit trace before retrying."
+    }
+    if (selectedItem.status === "manual_takeover") {
+      return "The agent has stepped aside. Use the audit and checkpoint tabs to understand the manual handoff."
+    }
+    if (selectedItem.status === "waiting_human" && selectedItem.intervention_kind === "information_request") {
+      return "The agent paused because it lacks a source-of-truth input. Supply the missing context or escalate."
+    }
+    if (selectedItem.status === "waiting_human" && selectedItem.intervention_kind === "failure_recovery") {
+      return "The agent hit a recoverable failure. Review the latest checkpoint before retrying or taking manual ownership."
     }
     if (selectedItem.status === "complete" || selectedItem.status === "escalated") {
       return "This case is closed, but the audit and checkpoint surfaces remain available for post-run review."
@@ -217,11 +227,37 @@ export function ContextInspector({ selectedItem, selectedSession }: Props) {
                 <div className="rounded-[1.35rem] border border-line bg-surface p-4">
                   <p className="text-xs uppercase tracking-[0.18em] text-ink-soft">Latest operator-facing signal</p>
                   <p className="mt-3 text-sm leading-6 text-ink">
-                    {summaryProposal ??
+                    {selectedSession?.failureContext?.message ??
+                      selectedSession?.manualTakeoverNote ??
+                      summaryProposal ??
                       selectedSession?.finalState?.execution_result ??
                       "No proposal has been produced yet."}
                   </p>
                 </div>
+
+                {(selectedSession?.failureContext || selectedSession?.manualTakeoverNote) && (
+                  <div className="rounded-[1.35rem] border border-line bg-surface p-4">
+                    <p className="text-xs uppercase tracking-[0.18em] text-ink-soft">Recovery context</p>
+                    <div className="mt-3 space-y-3">
+                      {selectedSession?.failureContext && (
+                        <>
+                          <SummaryMetric label="Failed node" value={selectedSession.failureContext.failed_node} />
+                          <SummaryMetric
+                            label="Retry state"
+                            value={
+                              selectedSession.failureContext.retry_available
+                                ? `retry ${selectedSession.failureContext.retry_count} available`
+                                : "retry exhausted"
+                            }
+                          />
+                        </>
+                      )}
+                      {selectedSession?.manualTakeoverNote && (
+                        <SummaryMetric label="Manual handoff" value={selectedSession.manualTakeoverNote} />
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 <div className="rounded-[1.35rem] border border-line bg-surface p-4">
                   <p className="text-xs uppercase tracking-[0.18em] text-ink-soft">Stage focus</p>
@@ -286,6 +322,15 @@ export function ContextInspector({ selectedItem, selectedSession }: Props) {
                       )}
                       {entry.escalation_category && <span>{entry.escalation_category}</span>}
                     </div>
+                    {entry.context_fields && Object.keys(entry.context_fields).length > 0 && (
+                      <div className="mt-3 rounded-[1rem] border border-line bg-surface-elevated px-3 py-2 text-sm text-ink-muted">
+                        {Object.entries(entry.context_fields).map(([key, value]) => (
+                          <p key={key}>
+                            <span className="font-medium text-ink-strong">{key}:</span> {value}
+                          </p>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))
             ) : (

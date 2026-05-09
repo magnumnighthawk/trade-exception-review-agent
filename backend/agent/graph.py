@@ -22,7 +22,7 @@ LangGraph compiles this into a runnable that you invoke like:
 """
 
 import logging
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
 
 from backend.agent.state import TradeExceptionState
 from backend.agent.nodes import (
@@ -37,6 +37,24 @@ logger = logging.getLogger(__name__)
 
 
 # ── Routing logic ──────────────────────────────────────────────────────────────
+
+def route_after_investigation(state: TradeExceptionState) -> str:
+    """
+    Route after investigation.
+
+    LEARNING: Phase 5 introduces new terminal states that can happen before a
+    proposal exists at all (for example, an information request that is escalated).
+    Investigation is no longer a guaranteed straight line into proposal generation.
+    """
+
+    status = state["status"]
+
+    if status in ("escalated", "manual_takeover", "error"):
+        logger.info("[route] Investigation ended with terminal status '%s'", status)
+        return "end"
+
+    return "propose"
+
 
 def route_after_execution(state: TradeExceptionState) -> str:
     """
@@ -65,7 +83,7 @@ def route_after_execution(state: TradeExceptionState) -> str:
         logger.info(f"[route] Rejection detected — looping back to investigate")
         return "investigate"
 
-    if status in ("complete", "escalated", "error"):
+    if status in ("complete", "escalated", "manual_takeover", "error"):
         logger.info(f"[route] Terminal status '{status}' — ending graph")
         return "end"
 
@@ -107,10 +125,17 @@ def build_graph():
     workflow.set_entry_point("receive_exception")
 
     # ── Linear edges ──────────────────────────────────────────────────────────
-    # These are unconditional — after node A, always go to node B.
     workflow.add_edge("receive_exception", "investigate")
-    workflow.add_edge("investigate", "propose_resolution")
     workflow.add_edge("propose_resolution", "execute_resolution")
+
+    workflow.add_conditional_edges(
+        "investigate",
+        route_after_investigation,
+        {
+            "propose": "propose_resolution",
+            "end": END,
+        },
+    )
 
     # ── Conditional edge ───────────────────────────────────────────────────────
     # After execute_resolution, the route depends on the human's decision.

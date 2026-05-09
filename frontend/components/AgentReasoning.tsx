@@ -43,7 +43,7 @@ type StageTone = "live" | "paused" | "complete" | "error" | "neutral"
 export function AgentReasoning({ status, currentStageId, stageHistory }: Props) {
   const isActive = status === "streaming" || status === "resuming"
   const isPaused = status === "waiting_human"
-  const isTerminal = status === "complete" || status === "escalated"
+  const isTerminal = status === "complete" || status === "escalated" || status === "manual_takeover"
   const [pinnedStageId, setPinnedStageId] = useState<string | null>(null)
 
   const latestStage = stageHistory.at(-1) ?? null
@@ -77,7 +77,7 @@ export function AgentReasoning({ status, currentStageId, stageHistory }: Props) 
 
   const selectedStageLabel = getStageToneLabel(
     selectedStageTone,
-    status === "escalated" && selectedStage?.id === latestStage?.id,
+    (status === "escalated" || status === "manual_takeover") && selectedStage?.id === latestStage?.id,
   )
 
   return (
@@ -154,7 +154,10 @@ export function AgentReasoning({ status, currentStageId, stageHistory }: Props) 
                         tone,
                       )}`}
                     >
-                      {getStageToneLabel(tone, status === "escalated" && stage.id === latestStage?.id)}
+                      {getStageToneLabel(
+                        tone,
+                        (status === "escalated" || status === "manual_takeover") && stage.id === latestStage?.id,
+                      )}
                     </span>
                   </div>
 
@@ -432,7 +435,7 @@ function getStageToneClass(tone: StageTone) {
 function getStageToneLabel(tone: StageTone, escalatedStage = false) {
   if (tone === "live") return "live"
   if (tone === "paused") return "paused"
-  if (tone === "complete") return escalatedStage ? "escalated" : "complete"
+  if (tone === "complete") return escalatedStage ? "handoff" : "complete"
   if (tone === "error") return "error"
   return "captured"
 }

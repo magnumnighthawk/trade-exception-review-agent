@@ -35,6 +35,9 @@ SAMPLE_EXCEPTIONS = {
         "counterparty": "Morgan Stanley",
         "reason": "Settlement amount ($875,000) differs from confirmed trade amount ($857,000) — $18,000 discrepancy, possible accrued interest miscalculation",
         "flagged_at": _now(),
+        "scenario": {
+            "force_low_confidence_proposal": 0.62,
+        },
     },
     "TRD-9841": {
         "trade_id": "TRD-9841",
@@ -43,6 +46,10 @@ SAMPLE_EXCEPTIONS = {
         "counterparty": "Barclays",
         "reason": "Settlement instruction failed — counterparty BIC code (BARCGB22) returned 'unknown recipient' from SWIFT network",
         "flagged_at": _now(),
+        "scenario": {
+            "simulate_recoverable_execution_failure": True,
+            "recoverable_failure_message": "Downstream settlement adapter timed out while confirming the retry.",
+        },
     },
     "TRD-9855": {
         "trade_id": "TRD-9855",
@@ -51,6 +58,14 @@ SAMPLE_EXCEPTIONS = {
         "counterparty": "Deutsche Bank",
         "reason": "Trade confirmation received from Deutsche Bank AG (Frankfurt) but settlement instructions reference Deutsche Bank Trust Company Americas (New York) — entity mismatch on a $12M position",
         "flagged_at": _now(),
+        "scenario": {
+            "requires_information_request": True,
+            "information_request_question": "The legal entity on the confirmation does not match the settlement account. Please provide the source-of-truth entity and settlement account that should be used.",
+            "information_request_fields": [
+                "source_of_truth_entity",
+                "approved_settlement_account",
+            ],
+        },
     },
 }
 

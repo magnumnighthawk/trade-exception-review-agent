@@ -339,6 +339,22 @@ POST /review/{thread_id}/reset → removes thread from state_store,
 ## Phase 5 — Happy Path, Sad Path, Failures
 ### Goal: Handle everything that goes wrong
 ### Time: 1 day
+### Status: ✅ BUILT
+
+Phase 5 is now implemented as a typed intervention system rather than a generic error path.
+
+- `proposal_review` keeps the existing approve / reject / modify / escalate contract
+- `information_request` lets the agent pause for missing source-of-truth inputs
+- `failure_recovery` lets operators retry, escalate, or take manual ownership after recoverable failures
+
+Concrete implementation notes:
+
+- backend policy now enforces low-confidence approval locks and retry ceilings
+- repeated rejection can end in `manual_takeover` instead of looping forever
+- recoverable execution failures checkpoint into a human recovery decision instead of silently failing
+- the right rail adapts to the intervention mode rather than assuming every pause is proposal review
+
+See [`docs/phases/phase-5-failure-paths.md`](docs/phases/phase-5-failure-paths.md) for the full Phase 5 walkthrough.
 
 **Happy Path:**
 ```
@@ -477,7 +493,10 @@ Day 4   → Phase 4: Multi-thread supervision UI                                
             - ExceptionQueue: real backend queue, ▶ Run / ↺ Reset per row
             - Queue API: pending + active exceptions, dedup, idempotent start
             - DecisionSurface: confidence gating, modify/reject/escalate/approve
-Day 5   → Phase 5: Sad paths and failure handling
+Day 5   → Phase 5: Sad paths and failure handling                              ✅ DONE
+            - Typed intervention modes: proposal review / information request / failure recovery
+            - Backend-enforced approval locks, retry ceilings, and manual takeover
+            - Deterministic Phase 5 validation script and dedicated docs
 Day 6   → Phase 6: Vercel AI SDK / CopilotKit exploration on top
 Day 7-8 → Polish + practice explaining it out loud
 ```

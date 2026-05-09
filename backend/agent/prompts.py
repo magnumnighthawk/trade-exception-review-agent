@@ -26,6 +26,19 @@ If you are uncertain, say so — an operator will provide additional guidance.
 Output format for structured responses: valid JSON only, no markdown fences."""
 
 
+def _format_additional_context(state: TradeExceptionState) -> str:
+    additional_context = state.get("additional_context") or {}
+    if not additional_context:
+        return ""
+
+    lines = "\n".join(f"- {key}: {value}" for key, value in additional_context.items())
+    return f"""
+ADDITIONAL HUMAN-PROVIDED CONTEXT:
+{lines}
+Use this as the source-of-truth when resolving ambiguity.
+"""
+
+
 # ── Investigation prompt ───────────────────────────────────────────────────────
 
 def build_investigation_prompt(state: TradeExceptionState) -> str:
@@ -39,20 +52,20 @@ def build_investigation_prompt(state: TradeExceptionState) -> str:
     exc = state["exception"]
     history_context = ""
 
-    # LEARNING: If this is a retry (investigation_attempts > 0), we include
-    # the rejection reason from the previous proposal so the agent can
-    # learn from it and produce a better investigation this time.
     if state.get("investigation_attempts", 0) > 0 and state.get("human_decision"):
         decision = state["human_decision"]
         history_context = f"""
-IMPORTANT — Previous investigation was rejected by human operator.
+IMPORTANT — Previous investigation/proposal cycle was rejected by a human operator.
 Rejection / modification instruction: {decision.get("modification", "No modification provided")}
 You must factor this feedback into your revised investigation.
 """
 
+    additional_context = _format_additional_context(state)
+
     return f"""{SYSTEM_CONTEXT}
 
 {history_context}
+{additional_context}
 You have received a flagged trade exception. Investigate it thoroughly.
 
 EXCEPTION DETAILS:
@@ -68,7 +81,7 @@ Investigate this exception. Return a JSON object with exactly these fields:
   "root_cause": "A precise, one-sentence description of what caused this exception",
   "evidence": ["fact 1", "fact 2", "fact 3"],
   "suggested_action": "A brief description of what should be done to resolve this",
-  "confidence": 0.0  // float between 0.0 and 1.0 — your confidence in this investigation
+  "confidence": 0.0
 }}
 
 Be honest about confidence. Low confidence triggers mandatory human review."""
@@ -99,6 +112,8 @@ A human operator has reviewed the previous proposal and provided this steering i
 Your new proposal MUST incorporate this instruction.
 """
 
+    additional_context = _format_additional_context(state)
+
     return f"""{SYSTEM_CONTEXT}
 
 You have investigated a trade exception and now need to produce a formal resolution proposal.
@@ -115,15 +130,16 @@ INVESTIGATION FINDINGS:
 - Suggested Action: {investigation["suggested_action"]}
 - Investigation Confidence: {investigation["confidence"]}
 
+{additional_context}
 {modification_context}
 
 Produce a formal resolution proposal. Return a JSON object with exactly these fields:
 {{
   "action": "A short, actionable title for the resolution (max 10 words)",
   "details": "Step-by-step explanation of what will be done and why",
-  "confidence": 0.0,  // float 0.0–1.0 — your confidence in this resolution
-  "requires_human_approval": true,  // always true in this system for safety
-  "risk_level": "low"  // one of: low, medium, high, critical
+  "confidence": 0.0,
+  "requires_human_approval": true,
+  "risk_level": "low"
 }}
 
 Risk level guidance:
@@ -139,8 +155,8 @@ def build_execution_confirmation_prompt(state: TradeExceptionState) -> str:
     """
     LEARNING: In this system, 'execution' means generating the exact
     instructions that the downstream settlement system would receive.
-    We're not actually calling a settlement API in Phase 1 (that's a
-    tool in a later phase), but we prepare the confirmation record.
+    We're not actually calling a settlement API yet, but we prepare the
+    confirmation record and make the failure/retry path explicit in Phase 5.
     """
     exc = state["exception"]
     proposal = state["proposal"]

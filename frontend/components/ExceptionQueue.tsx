@@ -19,6 +19,7 @@ const STATUS_LABELS: Record<string, string> = {
   resuming: "Resuming",
   complete: "Resolved",
   escalated: "Escalated",
+  manual_takeover: "Manual resolution",
   error: "Needs intervention",
 }
 
@@ -31,8 +32,8 @@ const SECTION_CONFIG: Array<{
 }> = [
   {
     id: "waiting_human",
-    title: "Awaiting review",
-    note: "Checkpointed cases blocking the workflow until an operator responds.",
+    title: "Awaiting intervention",
+    note: "Checkpointed cases paused for proposal review, extra context, or recovery guidance.",
     statuses: ["waiting_human"],
     accent: "border-[var(--warning-border)] bg-[var(--warning-soft)] text-[var(--warning-ink)]",
   },
@@ -60,11 +61,38 @@ const SECTION_CONFIG: Array<{
   {
     id: "closed",
     title: "Closed loop",
-    note: "Resolved or escalated cases kept secondary by default to reduce queue noise.",
-    statuses: ["complete", "escalated"],
+    note: "Resolved, escalated, or manually-owned cases kept secondary by default to reduce queue noise.",
+    statuses: ["complete", "escalated", "manual_takeover"],
     accent: "border-[var(--success-border)] bg-[var(--success-soft)] text-[var(--success-ink)]",
   },
 ]
+
+function getQueueStatusLabel(item: QueueItem) {
+  if (item.status === "waiting_human" && item.intervention_kind === "information_request") {
+    return "Awaiting info"
+  }
+  if (item.status === "waiting_human" && item.intervention_kind === "failure_recovery") {
+    return "Recovery required"
+  }
+  return STATUS_LABELS[item.status] || item.status
+}
+
+function getQueueStatusNote(item: QueueItem) {
+  if (item.status === "waiting_human" && item.intervention_kind === "information_request") {
+    return item.paused_at
+      ? `Awaiting source-of-truth input since ${new Date(item.paused_at).toLocaleString()}`
+      : "Awaiting source-of-truth input from an operator."
+  }
+  if (item.status === "waiting_human" && item.intervention_kind === "failure_recovery") {
+    return item.paused_at
+      ? `Recoverable failure paused at ${new Date(item.paused_at).toLocaleString()}`
+      : "Agent is waiting for retry, takeover, or escalation guidance."
+  }
+  if (item.status === "manual_takeover") {
+    return "This case left autonomous flow and is now owned by a human operator."
+  }
+  return null
+}
 
 interface Props {
   items: QueueItem[]
@@ -166,7 +194,7 @@ export function ExceptionQueue({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <QueueCountPill label="Awaiting review" value={queueCounts.urgent} tone="warning" />
+            <QueueCountPill label="Awaiting action" value={queueCounts.urgent} tone="warning" />
             <QueueCountPill label="In progress" value={queueCounts.live} tone="accent" />
             <QueueCountPill label="Ready" value={queueCounts.ready} tone="neutral" />
             <QueueCountPill label="Closed" value={queueCounts.closed} tone="success" />
@@ -311,17 +339,18 @@ function QueueCard({
   }
 
   const statusNote =
-    item.status === "waiting_human"
+    getQueueStatusNote(item) ??
+    (item.status === "waiting_human"
       ? formatPausedAt(item.paused_at)
       : item.status === "error"
         ? "Manual recovery required before this case can continue."
-        : item.status === "complete"
+      : item.status === "complete"
           ? "This case resolved successfully."
           : item.status === "escalated"
             ? "This case left the agent flow and was escalated."
             : item.status === "idle"
               ? "Ready for a fresh review run."
-              : "Agent is actively working on this case."
+              : "Agent is actively working on this case.")
 
   return (
     <article
@@ -356,7 +385,7 @@ function QueueCard({
               STATUS_PILL_CLASSES[item.status] || STATUS_PILL_CLASSES.idle
             }`}
           >
-            {STATUS_LABELS[item.status] || item.status}
+            {getQueueStatusLabel(item)}
           </span>
         </div>
 
@@ -390,6 +419,12 @@ function QueueCard({
           <div className="mt-4 rounded-[1rem] border border-line bg-surface-elevated px-3 py-2">
             <p className="text-[10px] uppercase tracking-[0.18em] text-ink-soft">Latest proposal</p>
             <p className="mt-1 text-xs italic leading-5 text-ink-muted">{item.proposal_action}</p>
+          </div>
+        )}
+
+        {item.intervention_kind && item.status === "waiting_human" && (
+          <div className="mt-3 inline-flex rounded-full border border-line-strong bg-surface-elevated px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-ink-muted">
+            {item.intervention_kind.replaceAll("_", " ")}
           </div>
         )}
 

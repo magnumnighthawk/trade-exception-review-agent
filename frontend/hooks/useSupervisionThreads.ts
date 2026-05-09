@@ -34,9 +34,12 @@ const defaultSession = (threadId: string): ThreadSession => ({
   currentNode: null,
   currentStageId: null,
   stageHistory: [],
+  interventionKind: null,
   interruptPayload: null,
   finalState: null,
   error: null,
+  failureContext: null,
+  manualTakeoverNote: null,
 })
 
 const toAgentStatus = (status: string): AgentStatus | "running" => {
@@ -49,6 +52,7 @@ const toAgentStatus = (status: string): AgentStatus | "running" => {
     status === "resuming" ||
     status === "complete" ||
     status === "escalated" ||
+    status === "manual_takeover" ||
     status === "error"
   ) {
     return status
@@ -162,9 +166,12 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
         currentNode: payload.current_node,
         currentStageId: liveStageId,
         stageHistory,
+        interventionKind: payload.intervention_kind,
         interruptPayload: payload.interrupt_payload,
         finalState: payload.final_state,
         error: payload.error,
+        failureContext: payload.failure_context,
+        manualTakeoverNote: payload.manual_takeover_note,
       }))
     },
     [upsertSession],
@@ -184,7 +191,9 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
               status: "streaming",
               currentNode: event.node,
               currentStageId: nextStageId,
+              interventionKind: null,
               error: null,
+              failureContext: null,
               stageHistory: [
                 ...base.stageHistory,
                 {
@@ -256,7 +265,19 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
               status: "waiting_human",
               currentNode: null,
               currentStageId: null,
+              interventionKind: event.interrupt_payload.kind,
               interruptPayload: event.interrupt_payload,
+              failureContext:
+                event.interrupt_payload.kind === "failure_recovery"
+                  ? {
+                      category: "execution_error",
+                      failed_node: event.interrupt_payload.failed_node,
+                      message: event.interrupt_payload.error_message,
+                      recoverable: event.interrupt_payload.recoverable,
+                      retry_available: event.interrupt_payload.retry_available,
+                      retry_count: event.interrupt_payload.retry_count,
+                    }
+                  : null,
             }
           })
           closeStream(threadId)
@@ -270,10 +291,18 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
 
             return {
               ...base,
-              status: event.status === "escalated" ? "escalated" : "complete",
+              status:
+                event.status === "escalated"
+                  ? "escalated"
+                  : event.status === "manual_takeover"
+                    ? "manual_takeover"
+                    : "complete",
               currentNode: null,
               currentStageId: null,
+              interventionKind: null,
               finalState: event.final_state,
+              failureContext: event.final_state.failure_context ?? null,
+              manualTakeoverNote: event.final_state.manual_takeover_note ?? null,
               stageHistory: base.stageHistory.map((stage) =>
                 stage.id === targetStageId && stage.status === "running"
                   ? { ...stage, status: "complete", completedAt: nowIso() }
@@ -294,7 +323,9 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
               status: "error",
               currentNode: null,
               currentStageId: null,
+              interventionKind: null,
               error: event.message,
+              failureContext: event.failure_context ?? null,
               stageHistory: base.stageHistory.map((stage) =>
                 stage.id === targetStageId && stage.status === "running"
                   ? { ...stage, status: "error", completedAt: nowIso() }
@@ -335,7 +366,8 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
           const alreadyTerminal =
             base.status === "waiting_human" ||
             base.status === "complete" ||
-            base.status === "escalated"
+            base.status === "escalated" ||
+            base.status === "manual_takeover"
           if (alreadyTerminal) return base
 
           const targetStageId = base.currentStageId ?? getLatestStageId(base.stageHistory)
@@ -346,6 +378,7 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
             error: "Stream disconnected",
             currentNode: null,
             currentStageId: null,
+            interventionKind: null,
             stageHistory: base.stageHistory.map((stage) =>
               stage.id === targetStageId && stage.status === "running"
                 ? { ...stage, status: "error", completedAt: nowIso() }
@@ -380,6 +413,7 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
           next[item.thread_id] = {
             ...next[item.thread_id],
             status: nextStatus,
+            interventionKind: item.intervention_kind ?? next[item.thread_id].interventionKind,
             currentStageId:
               nextStatus === "starting" ||
               nextStatus === "running" ||
@@ -459,9 +493,12 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
         currentNode: existing?.currentNode ?? null,
         currentStageId: existing?.currentStageId ?? null,
         stageHistory: existing?.stageHistory ?? [],
+        interventionKind: existing?.interventionKind ?? null,
         interruptPayload: existing?.interruptPayload ?? null,
         finalState: existing?.finalState ?? null,
         error: null,
+        failureContext: existing?.failureContext ?? null,
+        manualTakeoverNote: existing?.manualTakeoverNote ?? null,
       }))
 
       setSelectedTradeId(tradeId)
@@ -480,7 +517,14 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
 
       upsertSession(threadId, (session) => {
         const base = session ?? defaultSession(threadId)
-        return { ...base, status: "resuming", currentNode: null, currentStageId: null, error: null }
+        return {
+          ...base,
+          status: "resuming",
+          currentNode: null,
+          currentStageId: null,
+          interventionKind: null,
+          error: null,
+        }
       })
 
       const response = await fetch(`${API_BASE}/review/${threadId}/decision`, {
@@ -496,6 +540,7 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
             ...base,
             status: "error",
             currentStageId: null,
+            interventionKind: null,
             error: `Decision failed (${response.status})`,
           }
         })
@@ -505,10 +550,29 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
       const payload = (await response.json()) as { status: string }
       const nextStatus = payload.status
 
-      if (nextStatus === "complete" || nextStatus === "escalated") {
+      if (nextStatus === "complete" || nextStatus === "escalated" || nextStatus === "manual_takeover") {
         upsertSession(threadId, (session) => {
           const base = session ?? defaultSession(threadId)
-          return { ...base, status: toAgentStatus(nextStatus), currentStageId: null }
+          return {
+            ...base,
+            status: toAgentStatus(nextStatus),
+            currentStageId: null,
+            interventionKind: null,
+          }
+        })
+        await refreshQueue()
+        await hydrateThreadDetail(threadId)
+        return
+      }
+
+      if (nextStatus === "waiting_human") {
+        upsertSession(threadId, (session) => {
+          const base = session ?? defaultSession(threadId)
+          return {
+            ...base,
+            status: "waiting_human",
+            currentStageId: null,
+          }
         })
         await refreshQueue()
         await hydrateThreadDetail(threadId)
