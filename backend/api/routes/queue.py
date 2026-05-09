@@ -26,8 +26,8 @@ from fastapi import APIRouter, HTTPException
 from backend.agent.graph import graph
 from backend.agent.fixtures import SAMPLE_EXCEPTIONS
 from backend.api.models import (
-    QueueItem, QueueResponse, AuditEntryResponse, AuditLogResponse,
-    SubmitDecisionRequest, SubmitDecisionResponse
+    QueueItem, QueueResponse, ThreadDetailResponse, ThreadStageResponse,
+    AuditEntryResponse, AuditLogResponse, SubmitDecisionRequest, SubmitDecisionResponse
 )
 from backend.api.state_store import state_store
 from backend.api.audit_store import audit_store
@@ -128,28 +128,43 @@ async def get_waiting_queue():
     return QueueResponse(items=waiting, total=len(waiting))
 
 
-@router.get("/{thread_id}", response_model=QueueItem)
+@router.get("/{thread_id}", response_model=ThreadDetailResponse)
 async def get_thread_status(thread_id: str):
-    """Get status of a specific thread — used by the frontend to poll after decision."""
+    """
+    Get full detail for a specific supervised thread.
+
+    LEARNING: The queue list stays compact, but once an operator selects a
+    thread we hydrate the workstation with its persisted stage history and
+    final/checkpoint-visible state. This powers historical reasoning review.
+    """
     from fastapi import HTTPException
     entry = state_store.get(thread_id)
     if not entry:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
-    payload = entry.get("interrupt_payload") or {}
-    proposal = payload.get("proposal") or {}
-
-    return QueueItem(
+    return ThreadDetailResponse(
         thread_id=entry["thread_id"],
         trade_id=entry["trade_id"],
         status=entry["status"],
-        risk_level=proposal.get("risk_level"),
-        confidence=payload.get("confidence"),
-        amount=payload.get("amount"),
-        counterparty=_get_counterparty(entry["trade_id"]),
-        proposal_action=proposal.get("action"),
-        interrupt_payload=payload if entry["status"] == "waiting_human" else None,
+        current_node=entry.get("current_node"),
+        interrupt_payload=entry.get("interrupt_payload"),
+        final_state=entry.get("final_state"),
+        error=entry.get("error"),
         paused_at=entry.get("paused_at"),
+        stage_history=[
+            ThreadStageResponse(
+                stage_id=stage.get("stage_id"),
+                node=stage.get("node"),
+                message=stage.get("message"),
+                attempt=stage.get("attempt"),
+                status=stage.get("status"),
+                tokens=stage.get("tokens", ""),
+                state_snapshot=stage.get("state_snapshot"),
+                started_at=stage.get("started_at"),
+                completed_at=stage.get("completed_at"),
+            )
+            for stage in entry.get("stage_history", [])
+        ],
     )
 
 

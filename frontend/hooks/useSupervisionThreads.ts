@@ -1,28 +1,19 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+
 import type {
   AgentStatus,
-  AgentStateSnapshot,
   HumanDecision,
-  InterruptPayload,
   QueueItem,
   SSEEvent,
+  ThreadDetailResponse,
+  ThreadSession,
+  ThreadStageRecord,
+  ThreadStageResponse,
 } from "@/lib/types"
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
-
-type ThreadSession = {
-  threadId: string
-  tradeId: string
-  status: AgentStatus | "running"
-  tokens: string
-  currentNode: string | null
-  nodeHistory: string[]
-  interruptPayload: InterruptPayload | null
-  finalState: Partial<AgentStateSnapshot> | null
-  error: string | null
-}
 
 type StartReviewResponse = {
   thread_id: string
@@ -34,19 +25,19 @@ type QueueResponse = {
   total: number
 }
 
+const nowIso = () => new Date().toISOString()
+
 const defaultSession = (threadId: string): ThreadSession => ({
   threadId,
   tradeId: "unknown",
   status: "starting",
-  tokens: "",
   currentNode: null,
-  nodeHistory: [],
+  currentStageId: null,
+  stageHistory: [],
   interruptPayload: null,
   finalState: null,
   error: null,
 })
-
-const NODE_RESET_BOUNDARY = new Set(["receive_exception", "investigate", "propose_resolution"])
 
 const toAgentStatus = (status: string): AgentStatus | "running" => {
   if (status === "running") return "running"
@@ -65,12 +56,28 @@ const toAgentStatus = (status: string): AgentStatus | "running" => {
   return "error"
 }
 
+const toStageRecord = (stage: ThreadStageResponse): ThreadStageRecord => ({
+  id: stage.stage_id,
+  node: stage.node,
+  message: stage.message,
+  attempt: stage.attempt,
+  status: stage.status,
+  tokens: stage.tokens,
+  snapshot: stage.state_snapshot,
+  startedAt: stage.started_at,
+  completedAt: stage.completed_at,
+})
+
+const getLatestStageId = (stageHistory: ThreadStageRecord[]): string | null =>
+  stageHistory.length > 0 ? stageHistory[stageHistory.length - 1].id : null
+
 export interface UseSupervisionThreadsReturn {
   queueItems: QueueItem[]
   isQueueLoading: boolean
   queueError: string | null
   selectedThreadId: string | null
   selectedTradeId: string | null
+  selectedQueueItem: QueueItem | null
   selectedSession: ThreadSession | null
   selectQueueItem: (item: QueueItem) => void
   runTradeReview: (tradeId: string) => Promise<void>
@@ -90,26 +97,37 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
   const [sessions, setSessions] = useState<Record<string, ThreadSession>>({})
   const streamRefs = useRef<Record<string, EventSource>>({})
 
+  const selectedQueueItem = useMemo(() => {
+    if (selectedThreadId) {
+      const byThread = queueItems.find((item) => item.thread_id === selectedThreadId)
+      if (byThread) return byThread
+    }
+    if (selectedTradeId) {
+      return queueItems.find((item) => item.trade_id === selectedTradeId) ?? null
+    }
+    return null
+  }, [queueItems, selectedThreadId, selectedTradeId])
+
   const selectedSession = useMemo(() => {
     if (selectedThreadId && sessions[selectedThreadId]) {
       return sessions[selectedThreadId]
     }
-    if (selectedTradeId) {
-      const queueItem = queueItems.find((item) => item.trade_id === selectedTradeId)
-      if (queueItem?.thread_id && sessions[queueItem.thread_id]) {
-        return sessions[queueItem.thread_id]
-      }
+    if (selectedQueueItem?.thread_id && sessions[selectedQueueItem.thread_id]) {
+      return sessions[selectedQueueItem.thread_id]
     }
     return null
-  }, [selectedThreadId, selectedTradeId, sessions, queueItems])
+  }, [selectedQueueItem, selectedThreadId, sessions])
 
-  const upsertSession = useCallback((threadId: string, updater: (current: ThreadSession | null) => ThreadSession) => {
-    setSessions((prev) => {
-      const current = prev[threadId] ?? null
-      const next = updater(current)
-      return { ...prev, [threadId]: next }
-    })
-  }, [])
+  const upsertSession = useCallback(
+    (threadId: string, updater: (current: ThreadSession | null) => ThreadSession) => {
+      setSessions((prev) => {
+        const current = prev[threadId] ?? null
+        const next = updater(current)
+        return { ...prev, [threadId]: next }
+      })
+    },
+    [],
+  )
 
   const closeStream = useCallback((threadId: string) => {
     const stream = streamRefs.current[threadId]
@@ -118,107 +136,207 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
     delete streamRefs.current[threadId]
   }, [])
 
-  const handleStreamEvent = useCallback((threadId: string, event: SSEEvent) => {
-    switch (event.type) {
-      case "node_start":
-        upsertSession(threadId, (session) => {
-          const base = session ?? defaultSession(threadId)
-          const shouldResetTokens = NODE_RESET_BOUNDARY.has(event.node)
-          return {
-            ...base,
-            status: "streaming",
-            currentNode: event.node,
-            nodeHistory: [...base.nodeHistory, event.node],
-            tokens: shouldResetTokens ? "" : base.tokens,
-          }
-        })
-        break
+  const hydrateThreadDetail = useCallback(
+    async (threadId: string) => {
+      const response = await fetch(`${API_BASE}/queue/${threadId}`)
+      if (!response.ok) {
+        throw new Error(`Failed to load thread detail (${response.status})`)
+      }
 
-      case "token":
-        upsertSession(threadId, (session) => {
-          const base = session ?? defaultSession(threadId)
-          return { ...base, tokens: base.tokens + event.content }
-        })
-        break
+      const payload = (await response.json()) as ThreadDetailResponse
+      const stageHistory = payload.stage_history.map(toStageRecord)
 
-      case "node_complete":
-        upsertSession(threadId, (session) => {
-          const base = session ?? defaultSession(threadId)
-          return { ...base, currentNode: null }
-        })
-        break
+      upsertSession(threadId, (session) => ({
+        ...(session ?? defaultSession(threadId)),
+        threadId,
+        tradeId: payload.trade_id,
+        status: toAgentStatus(payload.status),
+        currentNode: payload.current_node,
+        currentStageId: payload.current_node ? getLatestStageId(stageHistory) : session?.currentStageId ?? getLatestStageId(stageHistory),
+        stageHistory,
+        interruptPayload: payload.interrupt_payload,
+        finalState: payload.final_state,
+        error: payload.error,
+      }))
+    },
+    [upsertSession],
+  )
 
-      case "hitl_interrupt":
-        // HITL: each thread independently enters waiting_human; switching tabs should
-        // not clear this state because operator may act on it later.
-        upsertSession(threadId, (session) => {
-          const base = session ?? defaultSession(threadId)
-          return {
-            ...base,
-            status: "waiting_human",
-            currentNode: null,
-            interruptPayload: event.interrupt_payload,
-          }
-        })
-        closeStream(threadId)
-        break
+  const handleStreamEvent = useCallback(
+    (threadId: string, event: SSEEvent) => {
+      switch (event.type) {
+        case "node_start":
+          upsertSession(threadId, (session) => {
+            const base = session ?? defaultSession(threadId)
+            const attempt = base.stageHistory.filter((stage) => stage.node === event.node).length + 1
+            const nextStageId = `${event.node}-${attempt}`
 
-      case "complete":
-        upsertSession(threadId, (session) => {
-          const base = session ?? defaultSession(threadId)
-          return {
-            ...base,
-            status: event.status === "escalated" ? "escalated" : "complete",
-            currentNode: null,
-            finalState: event.final_state,
-          }
-        })
-        closeStream(threadId)
-        break
+            return {
+              ...base,
+              status: "streaming",
+              currentNode: event.node,
+              currentStageId: nextStageId,
+              error: null,
+              stageHistory: [
+                ...base.stageHistory,
+                {
+                  id: nextStageId,
+                  node: event.node,
+                  message: event.message,
+                  attempt,
+                  status: "running",
+                  tokens: "",
+                  snapshot: null,
+                  startedAt: nowIso(),
+                  completedAt: null,
+                },
+              ],
+            }
+          })
+          break
 
-      case "error":
+        case "token":
+          upsertSession(threadId, (session) => {
+            const base = session ?? defaultSession(threadId)
+            const targetStageId = base.currentStageId ?? getLatestStageId(base.stageHistory)
+            if (!targetStageId) return base
+
+            return {
+              ...base,
+              stageHistory: base.stageHistory.map((stage) =>
+                stage.id === targetStageId
+                  ? { ...stage, tokens: `${stage.tokens}${event.content}` }
+                  : stage,
+              ),
+            }
+          })
+          break
+
+        case "node_complete":
+          upsertSession(threadId, (session) => {
+            const base = session ?? defaultSession(threadId)
+            const targetStageId =
+              base.currentStageId ??
+              [...base.stageHistory].reverse().find((stage) => stage.node === event.node)?.id ??
+              null
+
+            return {
+              ...base,
+              currentNode: null,
+              stageHistory: base.stageHistory.map((stage) =>
+                stage.id === targetStageId
+                  ? {
+                      ...stage,
+                      status: "complete",
+                      snapshot: event.state_snapshot,
+                      completedAt: nowIso(),
+                    }
+                  : stage,
+              ),
+            }
+          })
+          break
+
+        case "hitl_interrupt":
+          // HITL: each thread independently enters waiting_human; switching tabs should
+          // not clear this state because operator may act on it later.
+          upsertSession(threadId, (session) => {
+            const base = session ?? defaultSession(threadId)
+            return {
+              ...base,
+              status: "waiting_human",
+              currentNode: null,
+              interruptPayload: event.interrupt_payload,
+            }
+          })
+          closeStream(threadId)
+          break
+
+        case "complete":
+          upsertSession(threadId, (session) => {
+            const base = session ?? defaultSession(threadId)
+            return {
+              ...base,
+              status: event.status === "escalated" ? "escalated" : "complete",
+              currentNode: null,
+              finalState: event.final_state,
+            }
+          })
+          closeStream(threadId)
+          break
+
+        case "error":
+          upsertSession(threadId, (session) => {
+            const base = session ?? defaultSession(threadId)
+            const targetStageId = base.currentStageId ?? getLatestStageId(base.stageHistory)
+
+            return {
+              ...base,
+              status: "error",
+              currentNode: null,
+              error: event.message,
+              stageHistory: base.stageHistory.map((stage) =>
+                stage.id === targetStageId && stage.status === "running"
+                  ? { ...stage, status: "error", completedAt: nowIso() }
+                  : stage,
+              ),
+            }
+          })
+          closeStream(threadId)
+          break
+      }
+    },
+    [closeStream, upsertSession],
+  )
+
+  const openStream = useCallback(
+    (threadId: string, mode: "start" | "resume") => {
+      closeStream(threadId)
+      const suffix = mode === "resume" ? "/stream/resume" : "/stream"
+      const stream = new EventSource(`${API_BASE}/review/${threadId}${suffix}`)
+      streamRefs.current[threadId] = stream
+
+      stream.onmessage = (raw) => {
+        let parsed: SSEEvent
+        try {
+          parsed = JSON.parse(raw.data) as SSEEvent
+        } catch {
+          return
+        }
+        handleStreamEvent(threadId, parsed)
+      }
+
+      stream.onerror = () => {
+        // LEARNING: EventSource can raise onerror on normal close. We only treat
+        // it as a failure if this thread still has a live stream handle.
+        if (streamRefs.current[threadId] !== stream) return
         upsertSession(threadId, (session) => {
           const base = session ?? defaultSession(threadId)
+          const alreadyTerminal =
+            base.status === "waiting_human" ||
+            base.status === "complete" ||
+            base.status === "escalated"
+          if (alreadyTerminal) return base
+
+          const targetStageId = base.currentStageId ?? getLatestStageId(base.stageHistory)
+
           return {
             ...base,
             status: "error",
-            error: event.message,
+            error: "Stream disconnected",
+            currentNode: null,
+            stageHistory: base.stageHistory.map((stage) =>
+              stage.id === targetStageId && stage.status === "running"
+                ? { ...stage, status: "error", completedAt: nowIso() }
+                : stage,
+            ),
           }
         })
         closeStream(threadId)
-        break
-    }
-  }, [closeStream, upsertSession])
-
-  const openStream = useCallback((threadId: string, mode: "start" | "resume") => {
-    closeStream(threadId)
-    const suffix = mode === "resume" ? "/stream/resume" : "/stream"
-    const stream = new EventSource(`${API_BASE}/review/${threadId}${suffix}`)
-    streamRefs.current[threadId] = stream
-
-    stream.onmessage = (raw) => {
-      let parsed: SSEEvent
-      try {
-        parsed = JSON.parse(raw.data) as SSEEvent
-      } catch {
-        return
       }
-      handleStreamEvent(threadId, parsed)
-    }
-
-    stream.onerror = () => {
-      // LEARNING: EventSource can raise onerror on normal close. We only treat
-      // it as a failure if this thread still has a live stream handle.
-      if (streamRefs.current[threadId] !== stream) return
-      upsertSession(threadId, (session) => {
-        const base = session ?? defaultSession(threadId)
-        const alreadyTerminal = base.status === "waiting_human" || base.status === "complete" || base.status === "escalated"
-        if (alreadyTerminal) return base
-        return { ...base, status: "error", error: "Stream disconnected" }
-      })
-      closeStream(threadId)
-    }
-  }, [closeStream, handleStreamEvent, upsertSession])
+    },
+    [closeStream, handleStreamEvent, upsertSession],
+  )
 
   const refreshQueue = useCallback(async () => {
     try {
@@ -267,93 +385,126 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
     }
   }, [refreshInterval, refreshQueue])
 
-  const runTradeReview = useCallback(async (tradeId: string) => {
-    const response = await fetch(`${API_BASE}/review/start`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ trade_id: tradeId, operator_id: "operator_001" }),
-    })
-
-    if (!response.ok) {
-      throw new Error(`Failed to start review (${response.status})`)
-    }
-
-    const { thread_id } = (await response.json()) as StartReviewResponse
-
-    upsertSession(thread_id, (existing) => ({
-      threadId: thread_id,
-      tradeId,
-      status: "starting",
-      tokens: existing?.tokens ?? "",
-      currentNode: existing?.currentNode ?? null,
-      nodeHistory: existing?.nodeHistory ?? [],
-      interruptPayload: existing?.interruptPayload ?? null,
-      finalState: existing?.finalState ?? null,
-      error: null,
-    }))
-
-    setSelectedTradeId(tradeId)
-    setSelectedThreadId(thread_id)
-
-    openStream(thread_id, "start")
-    await refreshQueue()
-  }, [openStream, refreshQueue, upsertSession])
-
-  const submitDecision = useCallback(async (decision: HumanDecision) => {
+  useEffect(() => {
     if (!selectedThreadId) return
-    const threadId = selectedThreadId
 
-    upsertSession(threadId, (session) => {
-      const base = session ?? defaultSession(threadId)
-      return { ...base, status: "resuming", tokens: "", error: null }
-    })
+    let ignore = false
 
-    const response = await fetch(`${API_BASE}/review/${threadId}/decision`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(decision),
-    })
-
-    if (!response.ok) {
-      upsertSession(threadId, (session) => {
-        const base = session ?? defaultSession(threadId)
-        return { ...base, status: "error", error: `Decision failed (${response.status})` }
-      })
-      return
+    const loadSelectedThread = async () => {
+      try {
+        await hydrateThreadDetail(selectedThreadId)
+      } catch (error) {
+        if (!ignore) {
+          setQueueError(error instanceof Error ? error.message : "Failed to hydrate thread")
+        }
+      }
     }
 
-    const payload = (await response.json()) as { status: string }
-    const nextStatus = payload.status
+    void loadSelectedThread()
 
-    if (nextStatus === "complete" || nextStatus === "escalated") {
-      upsertSession(threadId, (session) => {
-        const base = session ?? defaultSession(threadId)
-        return { ...base, status: toAgentStatus(nextStatus) }
+    return () => {
+      ignore = true
+    }
+  }, [hydrateThreadDetail, selectedThreadId])
+
+  const runTradeReview = useCallback(
+    async (tradeId: string) => {
+      const response = await fetch(`${API_BASE}/review/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trade_id: tradeId, operator_id: "operator_001" }),
       })
+
+      if (!response.ok) {
+        throw new Error(`Failed to start review (${response.status})`)
+      }
+
+      const { thread_id } = (await response.json()) as StartReviewResponse
+
+      upsertSession(thread_id, (existing) => ({
+        ...(existing ?? defaultSession(thread_id)),
+        threadId: thread_id,
+        tradeId,
+        status: "starting",
+        currentNode: existing?.currentNode ?? null,
+        currentStageId: existing?.currentStageId ?? null,
+        stageHistory: existing?.stageHistory ?? [],
+        interruptPayload: existing?.interruptPayload ?? null,
+        finalState: existing?.finalState ?? null,
+        error: null,
+      }))
+
+      setSelectedTradeId(tradeId)
+      setSelectedThreadId(thread_id)
+
+      openStream(thread_id, "start")
       await refreshQueue()
-      return
-    }
+    },
+    [openStream, refreshQueue, upsertSession],
+  )
 
-    openStream(threadId, "resume")
-    await refreshQueue()
-  }, [openStream, refreshQueue, selectedThreadId, upsertSession])
+  const submitDecision = useCallback(
+    async (decision: HumanDecision) => {
+      if (!selectedThreadId) return
+      const threadId = selectedThreadId
 
-  const resetThread = useCallback(async (threadId: string) => {
-    closeStream(threadId)
-    await fetch(`${API_BASE}/review/${threadId}/reset`, { method: "POST" })
+      upsertSession(threadId, (session) => {
+        const base = session ?? defaultSession(threadId)
+        return { ...base, status: "resuming", currentNode: null, error: null }
+      })
 
-    setSessions((prev) => {
-      const next = { ...prev }
-      delete next[threadId]
-      return next
-    })
+      const response = await fetch(`${API_BASE}/review/${threadId}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(decision),
+      })
 
-    if (selectedThreadId === threadId) {
-      setSelectedThreadId(null)
-    }
+      if (!response.ok) {
+        upsertSession(threadId, (session) => {
+          const base = session ?? defaultSession(threadId)
+          return { ...base, status: "error", error: `Decision failed (${response.status})` }
+        })
+        return
+      }
 
-    await refreshQueue()
-  }, [closeStream, refreshQueue, selectedThreadId])
+      const payload = (await response.json()) as { status: string }
+      const nextStatus = payload.status
+
+      if (nextStatus === "complete" || nextStatus === "escalated") {
+        upsertSession(threadId, (session) => {
+          const base = session ?? defaultSession(threadId)
+          return { ...base, status: toAgentStatus(nextStatus) }
+        })
+        await refreshQueue()
+        await hydrateThreadDetail(threadId)
+        return
+      }
+
+      openStream(threadId, "resume")
+      await refreshQueue()
+    },
+    [hydrateThreadDetail, openStream, refreshQueue, selectedThreadId, upsertSession],
+  )
+
+  const resetThread = useCallback(
+    async (threadId: string) => {
+      closeStream(threadId)
+      await fetch(`${API_BASE}/review/${threadId}/reset`, { method: "POST" })
+
+      setSessions((prev) => {
+        const next = { ...prev }
+        delete next[threadId]
+        return next
+      })
+
+      if (selectedThreadId === threadId) {
+        setSelectedThreadId(null)
+      }
+
+      await refreshQueue()
+    },
+    [closeStream, refreshQueue, selectedThreadId],
+  )
 
   const selectQueueItem = useCallback((item: QueueItem) => {
     setSelectedTradeId(item.trade_id)
@@ -370,6 +521,7 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
     queueError,
     selectedThreadId,
     selectedTradeId,
+    selectedQueueItem,
     selectedSession,
     selectQueueItem,
     runTradeReview,

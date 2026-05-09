@@ -253,7 +253,11 @@ async def stream_review(thread_id: str):
                 # ── Node started ───────────────────────────────────────────────
                 if kind == "on_chain_start" and name in NODE_DESCRIPTIONS:
                     current_node = name
-                    state_store.set_current_node(thread_id, name)
+                    state_store.start_stage(
+                        thread_id=thread_id,
+                        node=name,
+                        message=NODE_DESCRIPTIONS.get(name, name),
+                    )
                     yield _sse(NodeStartEvent(
                         node=name,
                         message=NODE_DESCRIPTIONS.get(name, name),
@@ -265,6 +269,7 @@ async def stream_review(thread_id: str):
                 elif kind == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
+                        state_store.append_stage_token(thread_id, chunk.content)
                         yield _sse(TokenEvent(
                             content=chunk.content,
                             node=current_node or "unknown",
@@ -278,6 +283,7 @@ async def stream_review(thread_id: str):
                         k: v for k, v in (output or {}).items()
                         if k in ("status", "investigation", "proposal", "investigation_attempts")
                     }
+                    state_store.complete_stage(thread_id, name, snapshot)
                     yield _sse(NodeCompleteEvent(
                         node=name,
                         state_snapshot=snapshot,
@@ -319,13 +325,18 @@ async def stream_review(thread_id: str):
             else:
                 final_state = graph.get_state(config)
                 final_values = final_state.values if hasattr(final_state, "values") else {}
-                state_store.set_final(thread_id, final_values.get("status", "complete"))
+                final_snapshot = {
+                    k: v for k, v in final_values.items()
+                    if k not in ("audit_log",)
+                }
+                state_store.set_final(
+                    thread_id,
+                    final_values.get("status", "complete"),
+                    final_snapshot,
+                )
                 yield _sse(CompleteEvent(
                     status=final_values.get("status", "complete"),
-                    final_state={
-                        k: v for k, v in final_values.items()
-                        if k not in ("audit_log",)
-                    },
+                    final_state=final_snapshot,
                 ).model_dump())
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -367,6 +378,11 @@ async def stream_resume(thread_id: str):
 
                 if kind == "on_chain_start" and name in NODE_DESCRIPTIONS:
                     current_node = name
+                    state_store.start_stage(
+                        thread_id=thread_id,
+                        node=name,
+                        message=NODE_DESCRIPTIONS.get(name, name),
+                    )
                     yield _sse(NodeStartEvent(
                         node=name,
                         message=NODE_DESCRIPTIONS.get(name, name),
@@ -375,6 +391,7 @@ async def stream_resume(thread_id: str):
                 elif kind == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
+                        state_store.append_stage_token(thread_id, chunk.content)
                         yield _sse(TokenEvent(
                             content=chunk.content,
                             node=current_node or "unknown",
@@ -386,6 +403,7 @@ async def stream_resume(thread_id: str):
                         k: v for k, v in (output or {}).items()
                         if k in ("status", "investigation", "proposal", "execution_result", "escalation_reason")
                     }
+                    state_store.complete_stage(thread_id, name, snapshot)
                     yield _sse(NodeCompleteEvent(
                         node=name,
                         state_snapshot=snapshot,
@@ -402,13 +420,18 @@ async def stream_resume(thread_id: str):
             else:
                 final_state = graph.get_state(config)
                 final_values = final_state.values if hasattr(final_state, "values") else {}
-                state_store.set_final(thread_id, final_values.get("status", "complete"))
+                final_snapshot = {
+                    k: v for k, v in final_values.items()
+                    if k not in ("audit_log",)  # Don't send full audit over SSE
+                }
+                state_store.set_final(
+                    thread_id,
+                    final_values.get("status", "complete"),
+                    final_snapshot,
+                )
                 yield _sse(CompleteEvent(
                     status=final_values.get("status", "complete"),
-                    final_state={
-                        k: v for k, v in final_values.items()
-                        if k not in ("audit_log",)  # Don't send full audit over SSE
-                    },
+                    final_state=final_snapshot,
                 ).model_dump())
             terminal_event_emitted = True
 
@@ -425,6 +448,7 @@ async def stream_resume(thread_id: str):
                 terminal_event_emitted = True
             else:
                 logger.error(f"[stream/resume] Error in thread {thread_id}: {e}")
+                state_store.set_error(thread_id, str(e))
                 yield _sse(ErrorEvent(message=str(e)).model_dump())
                 terminal_event_emitted = True
 
@@ -439,13 +463,18 @@ async def stream_resume(thread_id: str):
             else:
                 final_state = graph.get_state(config)
                 final_values = final_state.values if hasattr(final_state, "values") else {}
-                state_store.set_final(thread_id, final_values.get("status", "complete"))
+                final_snapshot = {
+                    k: v for k, v in final_values.items()
+                    if k not in ("audit_log",)
+                }
+                state_store.set_final(
+                    thread_id,
+                    final_values.get("status", "complete"),
+                    final_snapshot,
+                )
                 yield _sse(CompleteEvent(
                     status=final_values.get("status", "complete"),
-                    final_state={
-                        k: v for k, v in final_values.items()
-                        if k not in ("audit_log",)
-                    },
+                    final_state=final_snapshot,
                 ).model_dump())
 
     return StreamingResponse(generate(), media_type="text/event-stream")

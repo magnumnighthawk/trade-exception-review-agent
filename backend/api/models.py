@@ -161,6 +161,44 @@ class QueueResponse(BaseModel):
     total: int
 
 
+class ThreadStageResponse(BaseModel):
+    """
+    One persisted stage in the agent's execution history.
+
+    LEARNING: This is the UI-safe summary of one node execution. We persist
+    both the streaming transcript and the node_complete snapshot so operators
+    can reconstruct the reasoning path even after a page refresh.
+    """
+    stage_id: str
+    node: str
+    message: str
+    attempt: int
+    status: Literal["running", "complete", "error"]
+    tokens: str = ""
+    state_snapshot: Optional[dict] = None
+    started_at: str
+    completed_at: Optional[str] = None
+
+
+class ThreadDetailResponse(BaseModel):
+    """
+    Full detail payload for one supervised thread.
+
+    LEARNING: The queue list stays lightweight, while this response gives the
+    selected thread enough history to power operator investigation tools such
+    as stage-by-stage review, checkpoint inspection, and contextual summaries.
+    """
+    thread_id: str
+    trade_id: str
+    status: str
+    current_node: Optional[str] = None
+    interrupt_payload: Optional[dict] = None
+    final_state: Optional[dict] = None
+    error: Optional[str] = None
+    paused_at: Optional[str] = None
+    stage_history: list[ThreadStageResponse] = Field(default_factory=list)
+
+
 class CheckpointStateResponse(BaseModel):
     """
     Lightweight checkpoint inspection payload.

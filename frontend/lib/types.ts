@@ -16,14 +16,16 @@
 // Adding a new status means the TypeScript compiler forces you to handle it
 // everywhere — that's the safety guarantee.
 export type AgentStatus =
-  | "idle"           // No agent running yet
-  | "starting"       // POST /review/start in-flight
-  | "streaming"      // SSE connected, agent is running
-  | "waiting_human"  // Agent hit interrupt() — HITL gate open
-  | "resuming"       // Human submitted decision, agent resuming
-  | "complete"       // Agent finished successfully
-  | "escalated"      // Case escalated to senior queue
-  | "error"          // Agent encountered an unrecoverable error
+  | "idle" // No agent running yet
+  | "starting" // POST /review/start in-flight
+  | "streaming" // SSE connected, agent is running
+  | "waiting_human" // Agent hit interrupt() — HITL gate open
+  | "resuming" // Human submitted decision, agent resuming
+  | "complete" // Agent finished successfully
+  | "escalated" // Case escalated to senior queue
+  | "error" // Agent encountered an unrecoverable error
+
+export type ThreadStageStatus = "running" | "complete" | "error"
 
 // ── SSE event types — discriminated union on `type` ──────────────────────────
 // LEARNING: Every event from the SSE stream has a `type` field.
@@ -122,6 +124,54 @@ export interface AgentStateSnapshot {
   escalation_reason: string
 }
 
+export interface ThreadStageResponse {
+  stage_id: string
+  node: string
+  message: string
+  attempt: number
+  status: ThreadStageStatus
+  tokens: string
+  state_snapshot: Partial<AgentStateSnapshot> | null
+  started_at: string
+  completed_at: string | null
+}
+
+export interface ThreadStageRecord {
+  id: string
+  node: string
+  message: string
+  attempt: number
+  status: ThreadStageStatus
+  tokens: string
+  snapshot: Partial<AgentStateSnapshot> | null
+  startedAt: string
+  completedAt: string | null
+}
+
+export interface ThreadDetailResponse {
+  thread_id: string
+  trade_id: string
+  status: AgentStatus | "running"
+  current_node: string | null
+  interrupt_payload: InterruptPayload | null
+  final_state: Partial<AgentStateSnapshot> | null
+  error: string | null
+  paused_at: string | null
+  stage_history: ThreadStageResponse[]
+}
+
+export interface ThreadSession {
+  threadId: string
+  tradeId: string
+  status: AgentStatus | "running"
+  currentNode: string | null
+  currentStageId: string | null
+  stageHistory: ThreadStageRecord[]
+  interruptPayload: InterruptPayload | null
+  finalState: Partial<AgentStateSnapshot> | null
+  error: string | null
+}
+
 // ── Human decision ─────────────────────────────────────────────────────────────
 
 export type DecisionAction = "approve" | "reject" | "modify" | "escalate"
@@ -135,7 +185,7 @@ export interface HumanDecision {
   escalation_category?: string | null
 }
 
-// ── Queue item ─────────────────────────────────────────────────────────────────
+// ── Queue items and inspector payloads ────────────────────────────────────────
 
 export interface QueueItem {
   thread_id: string | null
@@ -148,4 +198,36 @@ export interface QueueItem {
   proposal_action: string | null
   interrupt_payload: InterruptPayload | null
   paused_at: string | null
+}
+
+export interface AuditEntryResponse {
+  audit_entry_id: string
+  timestamp: string
+  operator_id: string
+  thread_id: string
+  trade_id: string
+  decision: DecisionAction
+  modification: string | null
+  reason: string | null
+  confidence_before: number | null
+  agent_proposal_before: string | null
+  escalation_category: string | null
+}
+
+export interface AuditLogResponse {
+  thread_id: string
+  trade_id: string
+  audit_entries: AuditEntryResponse[]
+  total_entries: number
+}
+
+export interface CheckpointStateResponse {
+  thread_id: string
+  has_checkpoint: boolean
+  has_interrupt: boolean
+  interrupt_count: number
+  next_node: string | null
+  status: string | null
+  state_keys: string[]
+  checkpointer_backend: string
 }

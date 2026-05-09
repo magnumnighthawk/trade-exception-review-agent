@@ -42,6 +42,9 @@ class AgentStateStore:
                 "current_node": None,
                 "interrupt_payload": None,
                 "paused_at": None,
+                "stage_history": [],
+                "final_state": None,
+                "error": None,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
 
@@ -74,6 +77,69 @@ class AgentStateStore:
             if thread_id in self._store:
                 self._store[thread_id]["current_node"] = node
 
+    def start_stage(self, thread_id: str, node: str, message: str):
+        with self._lock:
+            if thread_id not in self._store:
+                return
+
+            history = self._store[thread_id].setdefault("stage_history", [])
+            attempt = sum(1 for stage in history if stage.get("node") == node) + 1
+            stage_id = f"{node}-{attempt}"
+
+            history.append({
+                "stage_id": stage_id,
+                "node": node,
+                "message": message,
+                "attempt": attempt,
+                "status": "running",
+                "tokens": "",
+                "state_snapshot": None,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": None,
+            })
+
+            self._store[thread_id]["current_node"] = node
+
+    def append_stage_token(self, thread_id: str, token: str):
+        with self._lock:
+            if thread_id not in self._store or not token:
+                return
+
+            history = self._store[thread_id].get("stage_history") or []
+            if not history:
+                return
+
+            history[-1]["tokens"] = f"{history[-1].get('tokens', '')}{token}"
+
+    def complete_stage(self, thread_id: str, node: str, state_snapshot: Optional[dict] = None):
+        with self._lock:
+            if thread_id not in self._store:
+                return
+
+            history = self._store[thread_id].get("stage_history") or []
+            for stage in reversed(history):
+                if stage.get("node") == node and stage.get("status") == "running":
+                    stage["status"] = "complete"
+                    stage["state_snapshot"] = state_snapshot
+                    stage["completed_at"] = datetime.now(timezone.utc).isoformat()
+                    break
+
+            self._store[thread_id]["current_node"] = None
+
+    def fail_current_stage(self, thread_id: str):
+        with self._lock:
+            if thread_id not in self._store:
+                return
+
+            history = self._store[thread_id].get("stage_history") or []
+            if not history:
+                return
+
+            current_stage = history[-1]
+            if current_stage.get("status") == "running":
+                current_stage["status"] = "error"
+                current_stage["completed_at"] = datetime.now(timezone.utc).isoformat()
+
     def set_interrupt(self, thread_id: str, interrupt_payload: dict):
         """
         HITL: Mark this thread as paused and store the interrupt payload.
@@ -90,17 +156,26 @@ class AgentStateStore:
             if thread_id in self._store:
                 self._store[thread_id]["status"] = "resuming"
                 self._store[thread_id]["interrupt_payload"] = None
+                self._store[thread_id]["current_node"] = None
 
-    def set_final(self, thread_id: str, status: str):
+    def set_final(self, thread_id: str, status: str, final_state: Optional[dict] = None):
         with self._lock:
             if thread_id in self._store:
                 self._store[thread_id]["status"] = status
+                self._store[thread_id]["final_state"] = final_state
+                self._store[thread_id]["current_node"] = None
 
     def set_error(self, thread_id: str, error: str):
         with self._lock:
             if thread_id in self._store:
                 self._store[thread_id]["status"] = "error"
                 self._store[thread_id]["error"] = error
+                self._store[thread_id]["current_node"] = None
+
+                history = self._store[thread_id].get("stage_history") or []
+                if history and history[-1].get("status") == "running":
+                    history[-1]["status"] = "error"
+                    history[-1]["completed_at"] = datetime.now(timezone.utc).isoformat()
 
     def paused_threads(self) -> list[dict]:
         """Return all threads currently waiting for human input."""
