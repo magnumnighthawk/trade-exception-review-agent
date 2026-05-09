@@ -1,34 +1,7 @@
-"""
-Phase 1 test script — run the agent interactively from the terminal.
-
-LEARNING: Before building any API or UI, test your agent directly.
-This script lets you run the full HITL loop from the command line:
-  1. Agent investigates a trade exception
-  2. Agent proposes a resolution and pauses (interrupt)
-  3. You type your decision in the terminal (approve/reject/modify/escalate)
-  4. Agent resumes and executes (or loops back)
-
-Running this script will teach you:
-- What state looks like at each node transition
-- What the interrupt payload looks like (what your UI will receive)
-- How the thread_id connects the two halves of execution
-- How the audit log grows as the agent runs
-
-Usage:
-    python -m backend.scripts.run_phase1 [trade_id]
-
-Example:
-    python -m backend.scripts.run_phase1 TRD-9821
-"""
-
-import sys
-import json
 import uuid
-import asyncio
 import logging
 from datetime import datetime, timezone
 
-# Enable INFO logging so you can see what each node is doing
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(levelname)s | %(message)s")
 
 from langgraph.types import Command
@@ -92,13 +65,7 @@ def print_state_snapshot(state: dict):
 
 
 def _get_checkpoint_state(config: dict) -> tuple[dict, dict]:
-    """
-    Return (state_values, interrupt_payload) from the latest checkpoint.
-
-    LEARNING: When interrupt() is hit inside a node, that node has not returned
-    yet, so fields like `proposal` may not be merged into state.values.
-    The interrupt payload is stored on checkpoint tasks[*].interrupts[*].value.
-    """
+    """Return (state_values, interrupt_payload) from the latest checkpoint."""
     snapshot = graph.get_state(config)
     values = snapshot.values if hasattr(snapshot, "values") else {}
     interrupt_payload = {}
@@ -114,14 +81,6 @@ def _get_checkpoint_state(config: dict) -> tuple[dict, dict]:
 
 
 def get_human_decision(interrupt_payload: dict) -> dict:
-    """
-    LEARNING: This function simulates what the frontend DecisionSurface
-    will do in Phase 4. Here we collect input from the terminal.
-    The exact same dict shape will be submitted by the React UI later.
-
-    The interrupt_payload is what was passed to interrupt() in
-    propose_resolution_node. Your UI would render this.
-    """
     print_divider("HUMAN REVIEW REQUIRED")
     print(f"\n  Trade ID   : {interrupt_payload.get('trade_id')}")
     print(f"  Amount     : ${interrupt_payload.get('amount', 0):,.2f}")
@@ -162,27 +121,9 @@ def get_human_decision(interrupt_payload: dict) -> dict:
 
 
 def run_agent(trade_id: str, auto_approve: bool = False):
-    """
-    Run the agent for one trade exception, handling the HITL interrupt.
+    """Run the agent for one trade exception, handling interrupts in the terminal."""
+    print_divider("TRADE EXCEPTION REVIEW AGENT")
 
-    LEARNING: Notice the two-phase invocation pattern:
-      Phase A: graph.invoke() → hits interrupt() → returns interrupt data
-      Phase B: graph.invoke(Command(resume=...)) → resumes from checkpoint
-
-    The thread_id is what links Phase A to Phase B. Without it, LangGraph
-    wouldn't know which checkpointed state to resume.
-
-    In Phase 2, Phase A will be triggered by the stream endpoint, and
-    Phase B will be triggered by the decision endpoint. Same pattern,
-    just split across two HTTP requests from a browser.
-
-    Args:
-        trade_id: The trade ID to review
-        auto_approve: If True, automatically approve proposals (for testing)
-    """
-    print_divider("TRADE EXCEPTION REVIEW AGENT — Phase 1")
-
-    # Load the exception
     try:
         exception = get_exception(trade_id)
     except ValueError as e:
@@ -196,8 +137,6 @@ def run_agent(trade_id: str, auto_approve: bool = False):
     print(f"  Party    : {exception['counterparty']}")
     print(f"  Reason   : {exception['reason']}")
 
-    # Each run needs a unique thread_id so the checkpointer knows which
-    # state to save and resume. In production, this maps to a case ID.
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
@@ -206,9 +145,6 @@ def run_agent(trade_id: str, auto_approve: bool = False):
         print(f"  Mode      : AUTO-APPROVE (testing mode)")
     print(f"\n  Starting agent... (this will call OpenAI — give it a moment)")
 
-    # ── Run + resume loop ─────────────────────────────────────────────────────
-    # LEARNING: We keep looping until no interrupt payload exists.
-    # This supports multiple HITL cycles (e.g., reject -> re-investigate -> interrupt again).
     initial_state = {
         "exception": exception,
         "thread_id": thread_id,
@@ -221,7 +157,6 @@ def run_agent(trade_id: str, auto_approve: bool = False):
         current_state, interrupt_payload = _get_checkpoint_state(config)
 
         if not interrupt_payload:
-            # No pending interrupt means graph reached a terminal state.
             if current_state:
                 result = current_state
             break
@@ -244,7 +179,6 @@ def run_agent(trade_id: str, auto_approve: bool = False):
         print(f"\n  Resuming agent with decision: {human_decision['action']}...")
         result = graph.invoke(Command(resume=human_decision), config=config)
 
-    # ── Final state ────────────────────────────────────────────────────────────
     if result:
         print_state_snapshot(result)
         print_divider()
@@ -261,12 +195,12 @@ def run_agent(trade_id: str, auto_approve: bool = False):
             print(f"\n  Status: {status}")
 
         print(f"\n  Full audit trail has {len(result.get('audit_log', []))} entries.")
-        print(f"  Thread ID (save this for Phase 3 learning): {thread_id}\n")
+        print(f"  Thread ID: {thread_id}\n")
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Run Phase 1 agent interactively")
+    parser = argparse.ArgumentParser(description="Run the agent interactively")
     parser.add_argument("trade_id", nargs="?", default="TRD-9821", help="Trade ID to review")
     parser.add_argument("--auto-approve", "-a", action="store_true", help="Auto-approve proposals (testing mode)")
     args = parser.parse_args()

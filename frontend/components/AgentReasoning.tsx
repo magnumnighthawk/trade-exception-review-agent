@@ -1,23 +1,3 @@
-/**
- * AgentReasoning — Panel 2 of the supervision cockpit.
- *
- * LEARNING: This is the "transparent agent" component. Operators can see
- * every token the LLM produces in real time, the node progression, and
- * the structured outputs captured at each stage.
- *
- * Two key design decisions to study:
- *
- * 1. STAGE HISTORY: Each node execution is reviewable after the fact, so the
- *    operator can inspect the exact state that led to a pause or outcome.
- *
- * 2. LIVE VS REVIEW STATE: A thread can be active, paused for HITL, or frozen
- *    after completion. Those are different operator modes, and the UI should
- *    not collapse them into one generic "running" treatment.
- *
- * HITL: When status === "waiting_human", the current stage is no longer live.
- * It becomes checkpoint evidence for the operator to review before deciding.
- */
-
 "use client"
 
 import { useMemo, useState } from "react"

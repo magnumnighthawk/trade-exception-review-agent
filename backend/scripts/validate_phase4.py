@@ -1,30 +1,10 @@
 #!/usr/bin/env python3
-"""
-Phase 4 End-to-End Validation
-
-Tests the complete flow:
-1. Start a new review (POST /review/start)
-2. Stream until hitl_interrupt (GET /review/{thread_id}/stream)
-3. Inspect checkpoint (GET /review/{thread_id}/checkpoint)
-4. Query audit log before decision (GET /queue/audit/{thread_id})
-5. Submit decision with audit fields (POST /review/{thread_id}/decision)
-6. Log decision to audit trail (POST /queue/audit)
-7. Verify audit trail was created (GET /queue/audit/{thread_id})
-
-SUCCESS CRITERIA:
-- Interrupt flow works
-- Checkpoint accessible
-- Audit endpoints respond correctly
-- Decision logged to audit trail with all fields
-- Confidence gating prevents low-confidence approval
-- Escalation category captured
-"""
+"""End-to-end validation for the review, checkpoint, and audit flow."""
 
 import json
 import sys
 import os
 
-# Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from fastapi.testclient import TestClient
@@ -34,10 +14,9 @@ from backend.api.audit_store import audit_store
 client = TestClient(app)
 
 def test_phase4_audit_endpoints():
-    """Validate Phase 4 audit trail endpoints."""
-    print("\n=== PHASE 4 VALIDATION ===\n")
+    """Validate audit trail endpoints."""
+    print("\n=== AUDIT FLOW VALIDATION ===\n")
 
-    # 1. START REVIEW
     print("[1] Starting review for TRD-9821...")
     start_resp = client.post(
         "/review/start",
@@ -47,7 +26,6 @@ def test_phase4_audit_endpoints():
     thread_id = start_resp.json()["thread_id"]
     print(f"✓ Review started: {thread_id}\n")
 
-    # 2. STREAM UNTIL INTERRUPT
     print("[2] Streaming events until hitl_interrupt...")
     stream_resp = client.get(f"/review/{thread_id}/stream")
     assert stream_resp.status_code == 200, f"Stream failed: {stream_resp.text}"
@@ -68,7 +46,6 @@ def test_phase4_audit_endpoints():
     print(f"✓ Hit interrupt at node: {interrupt_payload.get('node')}")
     print(f"✓ Confidence: {interrupt_payload.get('confidence')}\n")
 
-    # 3. CHECKPOINT INSPECTION
     print("[3] Inspecting checkpoint...")
     checkpoint_resp = client.get(f"/review/{thread_id}/checkpoint")
     assert checkpoint_resp.status_code == 200, f"Checkpoint failed: {checkpoint_resp.text}"
@@ -77,13 +54,10 @@ def test_phase4_audit_endpoints():
     print(f"✓ Checkpoint has_interrupt: {checkpoint['has_interrupt']}")
     print(f"✓ Next node: {checkpoint.get('next_node')}\n")
 
-    # 4. QUERY AUDIT LOG (before decision)
     print("[4] Querying audit log before decision...")
     audit_before_resp = client.get(f"/queue/audit/{thread_id}")
-    # Will be 404 or empty list - that's OK
     print(f"✓ Audit log accessible (status: {audit_before_resp.status_code})\n")
 
-    # 5. TEST CONFIDENCE GATING
     print("[5] Testing confidence gating...")
     confidence = interrupt_payload.get("confidence", 0.5)
     print(f"  Agent confidence: {confidence:.0%}")
@@ -94,10 +68,9 @@ def test_phase4_audit_endpoints():
         print(f"  ✓ Sufficient confidence - approval allowed")
     print()
 
-    # 6. SUBMIT DECISION WITH AUDIT FIELDS
     print("[6] Submitting decision with audit fields...")
     decision_req = {
-        "action": "modify",  # Phase 4: steering pattern
+        "action": "modify",
         "modification": "Contact counterparty for confirmation first",
         "operator_id": "ops_johndoe",
         "reason": "Need explicit confirmation before updating IBAN",
@@ -111,7 +84,6 @@ def test_phase4_audit_endpoints():
     assert decision_resp.status_code == 200, f"Decision failed: {decision_resp.text}"
     print(f"✓ Decision submitted: {decision_req['action']}\n")
 
-    # 7. LOG DECISION TO AUDIT TRAIL
     print("[7] Logging decision to audit trail...")
     audit_req = {
         "thread_id": thread_id,
@@ -128,10 +100,8 @@ def test_phase4_audit_endpoints():
     audit_entry = audit_post_resp.json()
     print(f"✓ Decision logged: {audit_entry['audit_entry_id']}\n")
 
-    # 8. RETRIEVE AUDIT HISTORY
     print("[8] Retrieving audit history for thread...")
     audit_history_resp = client.get(f"/queue/audit/{thread_id}")
-    # Will have either 1 entry or 0 (depends on path)
     if audit_history_resp.status_code == 200:
         history = audit_history_resp.json()
         print(f"✓ Audit entries found: {history.get('total_entries', 0)}")

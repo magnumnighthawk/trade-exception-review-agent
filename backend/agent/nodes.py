@@ -1,19 +1,3 @@
-"""
-Agent nodes for the Trade Exception Review Agent.
-
-LEARNING: In LangGraph, a "node" is just a Python function.
-It receives the full state, does some work (calls an LLM, calls a tool,
-runs logic), and returns a dict of state updates to merge back in.
-
-The key rule: nodes must be pure with respect to state — never mutate
-the state object directly. Always return a new dict.
-
-Every node in this file has the same signature:
-    def node_name(state: TradeExceptionState) -> dict
-
-This predictability is what makes LangGraph graphs composable and testable.
-"""
-
 import json
 import logging
 from datetime import datetime, timezone
@@ -41,20 +25,11 @@ logger = logging.getLogger(__name__)
 
 @lru_cache(maxsize=1)
 def _get_llm() -> ChatOpenAI:
-    """
-    LEARNING: We use lazy initialisation via lru_cache rather than a module-level
-    global. This means the LLM client is only created the first time a node runs,
-    not at import time. This makes the module importable even without an API key
-    set — useful for testing, CI, and import-time graph compilation.
-    """
-
     from dotenv import load_dotenv
 
     load_dotenv("backend/.env")
     return ChatOpenAI(model="gpt-4o", temperature=0)
 
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -177,9 +152,6 @@ def _build_failure_recovery_payload(
         "policy": build_review_policy(),
     }
 
-
-# ── Node 1: Receive Exception ──────────────────────────────────────────────────
-
 def receive_exception_node(state: TradeExceptionState) -> dict:
     exc = state["exception"]
     logger.info("[receive_exception] Received exception %s", exc["trade_id"])
@@ -204,9 +176,6 @@ def receive_exception_node(state: TradeExceptionState) -> dict:
         "manual_takeover_note": state.get("manual_takeover_note"),
         "audit_log": state.get("audit_log", []) + [audit_entry],
     }
-
-
-# ── Node 2: Investigate ────────────────────────────────────────────────────────
 
 def investigate_node(state: TradeExceptionState) -> dict:
     exc = state["exception"]
@@ -246,8 +215,6 @@ def investigate_node(state: TradeExceptionState) -> dict:
             details=f"Agent requested additional context: {request_payload['question']}",
         )
 
-        # HITL: The agent cannot safely investigate further without a human
-        # supplying a source-of-truth answer, so execution is checkpointed here.
         human_response = interrupt(request_payload)
 
         if human_response["action"] == "escalate":
@@ -315,9 +282,6 @@ def investigate_node(state: TradeExceptionState) -> dict:
         "audit_log": state.get("audit_log", []) + audit_entries + [audit_entry],
     }
 
-
-# ── Node 3: Propose Resolution ─────────────────────────────────────────────────
-
 def propose_resolution_node(state: TradeExceptionState) -> dict:
     exc = state["exception"]
     logger.info("[propose_resolution] Building proposal for %s", exc["trade_id"])
@@ -340,8 +304,6 @@ def propose_resolution_node(state: TradeExceptionState) -> dict:
 
     logger.info("[propose_resolution] Proposal ready — confidence: %s", proposal["confidence"])
 
-    # HITL: Proposal review remains the primary approval gate, but Phase 5 now
-    # attaches typed policy metadata so the frontend and backend enforce the same rules.
     human_decision = interrupt(_build_proposal_interrupt_payload(state, proposal))
 
     decision_audit = _audit(
@@ -357,9 +319,6 @@ def propose_resolution_node(state: TradeExceptionState) -> dict:
         "failure_context": None,
         "audit_log": state.get("audit_log", []) + [audit_entry, decision_audit],
     }
-
-
-# ── Node 4: Execute Resolution ─────────────────────────────────────────────────
 
 def execute_resolution_node(state: TradeExceptionState) -> dict:
     decision = state["human_decision"]
@@ -443,8 +402,6 @@ def execute_resolution_node(state: TradeExceptionState) -> dict:
             details=failure_message,
         )
 
-        # HITL: A recoverable execution failure does not silently flip to error.
-        # The human is asked whether to retry, take manual control, or escalate.
         recovery_decision = interrupt(
             _build_failure_recovery_payload(
                 state,

@@ -1,25 +1,3 @@
-"""
-Audit trail store — immutable log of all human decisions.
-
-LEARNING: Phase 4 introduces the audit trail as a first-class concern.
-Every decision a human operator makes is logged here with full context:
-- operator ID, timestamp, decision type
-- what the agent proposed, what the human decided
-- the reason (for compliance review)
-
-This is separate from LangGraph's state because:
-1. State is mutable (agent updates it during execution)
-2. Audit trail is immutable (append-only, for compliance)
-3. Operators need to query "all decisions for this trade" across multiple runs
-
-In production:
-- This would be Postgres with row-level security
-- Immutable: the service account running the agent only has INSERT, not UPDATE/DELETE
-- Regulators (OCC, SEC) audit this table during compliance reviews
-
-For Phase 4, we use in-memory storage (list of dicts with thread-safe locking).
-"""
-
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -61,12 +39,7 @@ class AuditEntry:
 
 
 class AuditTrailStore:
-    """
-    Thread-safe append-only audit log.
-
-    HITL: Every decision goes here. In production, this would be a database
-    with immutable constraints. For Phase 4, in-memory with thread locking.
-    """
+    """Thread-safe append-only audit log."""
 
     def __init__(self):
         self._entries: list[AuditEntry] = []

@@ -60,8 +60,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
     const mediaQuery = window.matchMedia(SYSTEM_THEME_QUERY)
 
-    // LEARNING: We only react to OS theme changes while the operator is using
-    // the "system" preference so manual selections stay explicit and stable.
     const handleSystemThemeChange = () => {
       setThemeState((current) => {
         if (current.theme !== "system") return current

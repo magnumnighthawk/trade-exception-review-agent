@@ -1,17 +1,3 @@
-"""
-Sample trade exceptions for development and testing.
-
-LEARNING: Having a set of realistic, typed test fixtures is essential
-for agent development. You want to test:
-- Different exception types
-- Different confidence levels (low confidence should trigger more cautious behaviour)
-- Different amounts (amount affects risk_level in the proposal)
-- Edge cases (missing data, ambiguous reasons)
-
-In production, these would come from a settlement platform via a message
-queue (Kafka, SQS) or a database poll.
-"""
-
 from datetime import datetime, timezone
 
 
@@ -71,13 +57,7 @@ SAMPLE_EXCEPTIONS = {
 
 
 def get_exception(trade_id: str) -> dict:
-    """
-    Retrieve a sample exception by trade ID.
-
-    PRODUCTION: This would query your trade management database.
-    The function signature stays the same — only the implementation changes.
-    That's a good interface design principle for agent tools.
-    """
+    """Retrieve a sample exception by trade ID."""
     if trade_id not in SAMPLE_EXCEPTIONS:
         raise ValueError(f"Unknown trade ID: {trade_id}. Available: {list(SAMPLE_EXCEPTIONS.keys())}")
     return SAMPLE_EXCEPTIONS[trade_id]

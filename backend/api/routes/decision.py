@@ -1,14 +1,3 @@
-"""
-Human decision endpoint — resumes a paused agent.
-
-LEARNING: This endpoint is the second half of the HITL contract.
-When the frontend submits an intervention:
-  1. This endpoint receives the HumanDecisionRequest
-  2. It validates the action against the current intervention kind
-  3. It calls graph.invoke(Command(resume=...)) with the thread_id
-  4. The checkpointed agent resumes from where interrupt() paused it
-"""
-
 import logging
 from datetime import datetime, timezone
 

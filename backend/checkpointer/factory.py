@@ -1,15 +1,3 @@
-"""
-Checkpointer factory for LangGraph compilation.
-
-LEARNING: The checkpointer is the persistence boundary for HITL pause/resume.
-By centralising creation in one module, Phase 3 keeps the graph runtime
-decoupled from storage choices (memory vs postgres).
-
-Supported backends:
-- memory   (default) : in-process, development only
-- postgres (optional): requires langgraph-checkpoint-postgres + DB URL
-"""
-
 import logging
 import os
 
@@ -24,12 +12,7 @@ def checkpointer_backend() -> str:
 
 
 def build_checkpointer():
-    """
-    Build and return the configured checkpointer.
-
-    PRODUCTION: Use postgres to persist checkpoint state across process restarts
-    and horizontal scaling. MemorySaver is process-local and ephemeral.
-    """
+    """Build and return the configured checkpointer."""
     backend = checkpointer_backend()
 
     if backend == "postgres":
@@ -43,9 +26,6 @@ def build_checkpointer():
         try:
             from langgraph.checkpoint.postgres import PostgresSaver
 
-            # LEARNING: Using context-managed PostgresSaver at app startup is
-            # recommended in production. For this learning project we keep a
-            # simple constructor path with fallback behavior.
             logger.info("[checkpointer] Using postgres checkpointer backend")
             return PostgresSaver.from_conn_string(database_url)
         except Exception as error:

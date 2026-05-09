@@ -1,11 +1,3 @@
-/**
- * Shared TypeScript types for the Trade Exception Review Agent frontend.
- *
- * LEARNING: These types mirror the Pydantic models in backend/api/models.py.
- * Keeping them in sync is a discipline concern — in production you'd generate
- * them automatically from the OpenAPI schema.
- */
-
 export type AgentStatus =
   | "idle"
   | "starting"

@@ -1,25 +1,3 @@
-"""
-In-memory state store for active agent threads.
-
-LEARNING: This is the bridge between the stream and decision endpoints.
-When an agent starts, we register it here. When it hits an interrupt, we
-store the payload. When a human decides, decision.py reads it from here.
-The queue endpoint reads all entries to build the paused-agents list.
-
-Think of this as a lightweight process-local registry of "live" agent runs.
-
-PRODUCTION: Replace with Redis or Postgres.
-- Redis: use thread_id as key, store JSON, set TTL (e.g. 24h)
-- Postgres: a `threads` table with status + interrupt_payload column
-With multiple FastAPI workers (Gunicorn/uvicorn), in-memory won't work.
-The in-memory version here is correct for single-worker dev.
-
-TRADE-OFF: We could store everything in the LangGraph checkpointer and
-query it directly. But checkpointer state is opaque — we'd have to
-deserialise LangGraph's internal snapshot format. The state_store gives
-us a clean, queryable view of what the UI needs.
-"""
-
 import threading
 from datetime import datetime, timezone
 from typing import Optional
@@ -144,10 +122,6 @@ class AgentStateStore:
                 current_stage["completed_at"] = datetime.now(timezone.utc).isoformat()
 
     def set_interrupt(self, thread_id: str, interrupt_payload: dict):
-        """
-        HITL: Mark this thread as paused and store the interrupt payload.
-        The queue endpoint will surface this to operators.
-        """
         with self._lock:
             if thread_id in self._store:
                 self._store[thread_id]["status"] = "waiting_human"

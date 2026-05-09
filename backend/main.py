@@ -1,14 +1,3 @@
-"""
-FastAPI entry point for the Trade Exception Review Agent backend.
-
-LEARNING: We keep main.py minimal — its only job is to wire together
-the FastAPI app, CORS, and route registrations. Business logic stays
-in agent/ and api/routes/.
-
-This separation means you can test the agent graph completely independently
-of the web server. A key production discipline.
-"""
-
 import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,9 +14,6 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# LEARNING: CORS is needed because the Next.js frontend (localhost:3000)
-# makes requests to this FastAPI server (localhost:8000).
-# In production, lock this down to your actual frontend domain.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -41,11 +27,6 @@ app.add_middleware(
 async def health():
     return {"status": "ok", "agent": "trade-exception-review"}
 
-
-# Phase 2: Route registrations
-# LEARNING: We register routers here at the app level, not inside the route
-# files themselves. This keeps routes as pure request handlers with no
-# knowledge of the app they're mounted into.
 from backend.api.routes import stream, decision, queue
 app.include_router(stream.router)
 app.include_router(decision.router)

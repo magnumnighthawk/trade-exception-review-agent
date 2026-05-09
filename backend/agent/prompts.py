@@ -1,19 +1,4 @@
-"""
-Prompt templates for the Trade Exception Review Agent.
-
-LEARNING: Keeping prompts in a dedicated file is a production discipline.
-Prompts are effectively code — they change behaviour, they need versioning,
-and they benefit from review. Do not inline them inside node functions.
-
-Each prompt is a function that takes state and returns a formatted string.
-This keeps them testable in isolation (you can unit-test prompt output
-without running the full agent).
-"""
-
 from backend.agent.state import TradeExceptionState
-
-
-# ── System context ─────────────────────────────────────────────────────────────
 
 SYSTEM_CONTEXT = """You are a trade exception review specialist at a major investment bank.
 You investigate flagged trade exceptions, determine their root cause with precision,
@@ -38,17 +23,7 @@ ADDITIONAL HUMAN-PROVIDED CONTEXT:
 Use this as the source-of-truth when resolving ambiguity.
 """
 
-
-# ── Investigation prompt ───────────────────────────────────────────────────────
-
 def build_investigation_prompt(state: TradeExceptionState) -> str:
-    """
-    LEARNING: The investigation prompt is the agent's first 'thinking' step.
-    We give it the raw exception and ask it to reason about root cause before
-    proposing anything. Separating investigation from proposal is intentional —
-    it mirrors how a skilled analyst works, and it means the human can see
-    the reasoning chain, not just the conclusion.
-    """
     exc = state["exception"]
     history_context = ""
 
@@ -86,19 +61,7 @@ Investigate this exception. Return a JSON object with exactly these fields:
 
 Be honest about confidence. Low confidence triggers mandatory human review."""
 
-
-# ── Proposal prompt ────────────────────────────────────────────────────────────
-
 def build_proposal_prompt(state: TradeExceptionState) -> str:
-    """
-    LEARNING: The proposal prompt takes the investigation output as input
-    and produces a formal resolution proposal. Note how we pass the full
-    investigation result — the LLM can use the evidence and suggested action
-    to form a more grounded proposal.
-
-    We also pass the exception amount here because amount thresholds are
-    a key driver of risk_level — the agent needs this context.
-    """
     exc = state["exception"]
     investigation = state["investigation"]
 
@@ -148,16 +111,7 @@ Risk level guidance:
 - medium: amount $100K–$1M, or standard IBAN/amount discrepancy
 - low: amount < $100K, routine correction"""
 
-
-# ── Execution prompt ───────────────────────────────────────────────────────────
-
 def build_execution_confirmation_prompt(state: TradeExceptionState) -> str:
-    """
-    LEARNING: In this system, 'execution' means generating the exact
-    instructions that the downstream settlement system would receive.
-    We're not actually calling a settlement API yet, but we prepare the
-    confirmation record and make the failure/retry path explicit in Phase 5.
-    """
     exc = state["exception"]
     proposal = state["proposal"]
     decision = state["human_decision"]

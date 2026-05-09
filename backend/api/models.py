@@ -1,12 +1,3 @@
-"""
-Pydantic models for API request/response contracts.
-
-LEARNING: Keeping API models in one file enforces a clean boundary between
-your agent's internal TypedDict state and what the HTTP layer exposes.
-Never expose your raw LangGraph state over the wire — the API contract
-should be stable even as the internal state schema evolves.
-"""
-
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -35,13 +26,7 @@ class StartReviewRequest(BaseModel):
 
 
 class HumanDecisionRequest(BaseModel):
-    """
-    POST /review/{thread_id}/decision — submit a human intervention to resume
-    the paused agent.
-
-    LEARNING: Phase 5 broadens this contract beyond proposal review so the
-    same endpoint can resume information requests and recovery workflows.
-    """
+    """POST /review/{thread_id}/decision payload."""
 
     action: DecisionAction
     modification: Optional[str] = Field(
@@ -140,12 +125,7 @@ class NodeCompleteEvent(SSEEvent):
 
 
 class HitlInterruptEvent(SSEEvent):
-    """
-    Emitted when the agent pauses for human intervention.
-
-    HITL: The `kind` inside interrupt_payload tells the frontend which
-    intervention surface to render.
-    """
+    """Emitted when the agent pauses for human intervention."""
 
     type: Literal["hitl_interrupt"] = "hitl_interrupt"
     thread_id: str
@@ -181,12 +161,7 @@ class DecisionResponse(BaseModel):
 
 
 class QueueItem(BaseModel):
-    """
-    One entry in the supervision queue.
-
-    LEARNING: Phase 5 keeps status lightweight, but adds `intervention_kind`
-    so operators can distinguish review, information, and recovery stops.
-    """
+    """One entry in the supervision queue."""
 
     thread_id: Optional[str] = None
     trade_id: str

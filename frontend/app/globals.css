@@ -114,8 +114,6 @@ html[data-theme="dark"] {
   --font-display: var(--font-display);
 }
 
-/* LEARNING: The cockpit uses semantic tokens so the theme switcher changes the
-   whole UI from one source of truth instead of branching each component. */
 html {
   min-height: 100%;
 }

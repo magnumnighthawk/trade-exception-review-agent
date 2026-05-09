@@ -256,8 +256,6 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
           break
 
         case "hitl_interrupt":
-          // HITL: each thread independently enters waiting_human; switching tabs should
-          // not clear this state because operator may act on it later.
           upsertSession(threadId, (session) => {
             const base = session ?? defaultSession(threadId)
             return {
@@ -358,8 +356,6 @@ export function useSupervisionThreads(refreshInterval = 2000): UseSupervisionThr
       }
 
       stream.onerror = () => {
-        // LEARNING: EventSource can raise onerror on normal close. We only treat
-        // it as a failure if this thread still has a live stream handle.
         if (streamRefs.current[threadId] !== stream) return
         upsertSession(threadId, (session) => {
           const base = session ?? defaultSession(threadId)

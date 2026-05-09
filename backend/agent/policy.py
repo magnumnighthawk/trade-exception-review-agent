@@ -1,11 +1,3 @@
-"""
-Phase 5 policy configuration for failure handling and human intervention.
-
-LEARNING: Policy belongs in configuration, not scattered through node logic.
-These values determine when the agent must stop, when humans must intervene,
-and how many retries are acceptable before the case leaves autonomous flow.
-"""
-
 LOW_CONFIDENCE_THRESHOLD = 0.70
 HIGH_CONFIDENCE_THRESHOLD = 0.85
 MAX_INVESTIGATION_ATTEMPTS = 3

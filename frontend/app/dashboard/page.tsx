@@ -1,20 +1,3 @@
-/**
- * Dashboard page — the three-panel supervision cockpit.
- *
- * LEARNING: This page is the composition layer. It:
- * 1. Owns the useSupervisionThreads hook (single source of truth for agent state)
- * 2. Passes the right slice of state to each panel
- * 3. Switches the right rail based on the operator's current task
- *
- * The workstation adapts to context:
- * - triage on the left
- * - stage-by-stage reasoning in the center
- * - contextual inspector or decision surface on the right
- *
- * HITL: The agent still decides when the action surface appears. The layout only
- * upgrades the right rail into DecisionSurface when status === "waiting_human".
- */
-
 "use client"
 
 import { AgentReasoning } from "@/components/AgentReasoning"

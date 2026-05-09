@@ -1,29 +1,5 @@
-"""
-Queue endpoint — surfaces all paused agent threads to operators.
-
-LEARNING: This is what feeds Panel 1 (ExceptionQueue) in the supervision UI.
-The queue is the entry point for human operators — they see all threads
-currently waiting for their input, sorted by urgency.
-
-In a real system at scale, this endpoint would:
-- Query Postgres for all threads with status='waiting_human'
-- Join with trade data for enrichment
-- Apply role-based access (operator only sees their assigned trades)
-- Support pagination and filtering
-
-For Phase 2, we query the in-memory state_store.
-
-HITL: The queue is the supervision surface's first panel. Without it,
-operators have no visibility into which agents need their attention.
-This is the fleet management view.
-
-Phase 4: Added audit endpoints (GET /queue/audit, POST /queue/audit)
-to log and retrieve operator decisions for compliance.
-"""
-
 import logging
 from fastapi import APIRouter, HTTPException
-from backend.agent.graph import graph
 from backend.agent.fixtures import SAMPLE_EXCEPTIONS
 from backend.api.models import (
     QueueItem, QueueResponse, ThreadDetailResponse, ThreadStageResponse,
@@ -38,16 +14,7 @@ router = APIRouter(prefix="/queue", tags=["queue"])
 
 @router.get("/", response_model=QueueResponse)
 async def get_queue():
-    """
-    Return all agent threads currently waiting for human input.
-
-    LEARNING: We enrich state_store entries with interrupt_payload data
-    (risk_level, confidence, amount, counterparty) so the UI can sort
-    and prioritise without making additional requests.
-
-    Sort order: critical → high → medium → low, then by paused_at (oldest first).
-    This means the most dangerous cases bubble to the top.
-    """
+    """Return queue items ordered by actionability and risk."""
     risk_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, None: 4}
     status_order = {
         "waiting_human": 0,
@@ -92,8 +59,6 @@ async def get_queue():
             paused_at=entry.get("paused_at"),
         ))
 
-    # HITL: Pending exceptions are visible before a run starts, so operators can
-    # launch multiple reviews concurrently from the supervision queue.
     for trade_id, exception in SAMPLE_EXCEPTIONS.items():
         if trade_id in active_trade_ids:
             continue
@@ -133,13 +98,7 @@ async def get_waiting_queue():
 
 @router.get("/{thread_id}", response_model=ThreadDetailResponse)
 async def get_thread_status(thread_id: str):
-    """
-    Get full detail for a specific supervised thread.
-
-    LEARNING: The queue list stays compact, but once an operator selects a
-    thread we hydrate the workstation with its persisted stage history and
-    final/checkpoint-visible state. This powers historical reasoning review.
-    """
+    """Get full detail for a specific supervised thread."""
     from fastapi import HTTPException
     entry = state_store.get(thread_id)
     if not entry:
@@ -189,20 +148,9 @@ def _get_amount(trade_id: str) -> float | None:
     except Exception:
         return None
 
-
-# ── Audit endpoints (Phase 4) ──────────────────────────────────────────────
-
 @router.get("/audit/{thread_id}", response_model=AuditLogResponse)
 async def get_audit_log(thread_id: str, limit: int = 50):
-    """
-    GET /queue/audit/{thread_id} — retrieve decision history for a thread.
-
-    HITL: Operators see this when they click into a thread. It shows:
-    - All previous decisions on this thread
-    - Why each operator decided (the reason field)
-    - If it was modified, what the modification was
-    This is full traceability for compliance.
-    """
+    """Retrieve decision history for a thread."""
     entry = state_store.get(thread_id)
     if not entry:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
@@ -239,23 +187,13 @@ async def get_audit_log(thread_id: str, limit: int = 50):
 
 @router.post("/audit", response_model=SubmitDecisionResponse)
 async def submit_audit_entry(req: SubmitDecisionRequest):
-    """
-    POST /queue/audit — log a human decision to the audit trail.
-
-    Phase 4: When a human submits a decision via DecisionSurface,
-    this endpoint logs it to the immutable audit trail.
-
-    PRODUCTION: This would write to an append-only database table
-    with no UPDATE/DELETE permissions for the agent service account.
-    Regulators audit this table during compliance reviews.
-    """
+    """Log a human decision to the audit trail."""
     entry = state_store.get(req.thread_id)
     if not entry:
         raise HTTPException(status_code=404, detail=f"Thread {req.thread_id} not found")
 
     trade_id = entry.get("trade_id", "unknown")
 
-    # Log to audit trail (append-only)
     audit_entry = audit_store.log_decision(
         thread_id=req.thread_id,
         trade_id=trade_id,
@@ -283,16 +221,7 @@ async def submit_audit_entry(req: SubmitDecisionRequest):
 
 @router.get("/audit/trade/{trade_id}", response_model=list[AuditEntryResponse])
 async def get_audit_history_for_trade(trade_id: str, limit: int = 100):
-    """
-    GET /queue/audit/trade/{trade_id} — retrieve all decisions for a trade.
-
-    LEARNING: This is different from thread audit log. A single trade_id
-    may have multiple threads (multiple agents retried it). This endpoint
-    shows the full decision history across all runs of that trade.
-
-    Useful for: compliance audit, understanding why a trade got escalated,
-    seeing operator notes over time.
-    """
+    """Retrieve all decisions for a trade across threads."""
     audit_entries = audit_store.get_entries_for_trade(trade_id)
     if limit:
         audit_entries = audit_entries[-limit:]

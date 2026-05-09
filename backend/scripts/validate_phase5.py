@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""
-Phase 5 deterministic validation.
-
-This script patches the LLM layer so Phase 5 failure paths can be exercised
-without network access or model credentials.
-"""
+"""Deterministic validation for failure and recovery flows."""
 
 import json
 import os
